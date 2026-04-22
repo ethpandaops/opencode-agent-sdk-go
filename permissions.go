@@ -31,12 +31,44 @@ type FsWriteCallback func(ctx context.Context, req acp.WriteTextFileRequest) err
 // WithCanUseTool registers a callback for session/request_permission.
 // If unset, the SDK auto-rejects every permission request and logs a
 // warning — opencode surfaces this to the agent as tool rejection.
+//
+// Important: opencode only emits session/request_permission when its
+// own permission ruleset resolves to "ask" for the tool. The out-of-
+// the-box opencode config has "*": "allow", so no callbacks fire until
+// the user sets explicit rules in their opencode.json, e.g.:
+//
+//	{
+//	  "permission": {
+//	    "edit":  "ask",
+//	    "write": "ask",
+//	    "bash":  "ask"
+//	  }
+//	}
+//
+// The plan agent has its own ruleset that denies edits inline (no ask),
+// so permission prompts from plan mode are not reachable via this
+// callback either.
 func WithCanUseTool(cb PermissionCallback) Option {
 	return func(o *options) { o.canUseTool = cb }
 }
 
 // WithOnFsWrite registers a callback for fs/write_text_file
 // delegations. If unset, the SDK writes the file to disk.
+//
+// opencode does NOT use fs/write_text_file as its primary write path —
+// the built-in write and edit tools write directly to the local
+// filesystem via Node fs. fs/write_text_file is a secondary sync
+// notification opencode sends after an approved "edit" permission, so
+// editor clients (VS Code, Zed, …) can update their in-memory buffer.
+// That means this callback only fires after:
+//
+//  1. opencode's ruleset is configured with permission.edit = "ask"
+//     (see WithCanUseTool for config example), and
+//  2. the WithCanUseTool callback allows the edit.
+//
+// The write has already happened on opencode's side by the time this
+// callback runs; returning an error from it does not undo the write,
+// it only surfaces the error back over JSON-RPC.
 func WithOnFsWrite(cb FsWriteCallback) Option {
 	return func(o *options) { o.onFsWrite = cb }
 }

@@ -3,6 +3,7 @@ package opencodesdk
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -177,6 +178,82 @@ func TestRunTurn_CtxCancelledDuringPromptReturnsPromptErr(t *testing.T) {
 
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want errors.Is(context.Canceled)", err)
+	}
+}
+
+// TestRunTurn_ReturnsWhenUpdatesChannelStaysOpen guards against a
+// regression where runTurn blocked for the full remaining ctx deadline
+// after every successful turn because its drain goroutine was waiting
+// for the updates channel to close. In practice the channel stays open
+// for the whole session lifetime, so multi-turn callers (QueryStream)
+// hung indefinitely between turns.
+func TestRunTurn_ReturnsWhenUpdatesChannelStaysOpen(t *testing.T) {
+	s := newFakeSession(8)
+
+	s.prompt = func(_ context.Context, _ ...acp.ContentBlock) (*PromptResult, error) {
+		s.updates <- chunkNotification(s.id, "ok")
+
+		// Intentionally do NOT close s.updates — the session lives on.
+		return &PromptResult{StopReason: acp.StopReasonEndTurn}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	t0 := time.Now()
+
+	res, err := runTurn(ctx, s, acp.TextBlock("hi"))
+	if err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+
+	// Must return well under the ctx deadline. Trailing-grace window is
+	// 100ms; give generous headroom for slow CI.
+	if elapsed := time.Since(t0); elapsed > 2*time.Second {
+		t.Fatalf("runTurn did not return promptly: %s", elapsed)
+	}
+
+	if res.AssistantText != "ok" {
+		t.Fatalf("AssistantText = %q, want %q", res.AssistantText, "ok")
+	}
+}
+
+// TestRunTurn_MultipleTurnsOnSameChannel exercises the QueryStream-style
+// call pattern: reuse the same session/updates channel across turns.
+// Each turn must complete in bounded time, and each must capture only
+// its own notifications.
+func TestRunTurn_MultipleTurnsOnSameChannel(t *testing.T) {
+	s := newFakeSession(8)
+
+	var turn int
+
+	s.prompt = func(_ context.Context, _ ...acp.ContentBlock) (*PromptResult, error) {
+		turn++
+
+		s.updates <- chunkNotification(s.id, fmt.Sprintf("turn-%d", turn))
+
+		return &PromptResult{StopReason: acp.StopReasonEndTurn}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	for i := 1; i <= 3; i++ {
+		t0 := time.Now()
+
+		res, err := runTurn(ctx, s, acp.TextBlock("x"))
+		if err != nil {
+			t.Fatalf("turn %d runTurn: %v", i, err)
+		}
+
+		if elapsed := time.Since(t0); elapsed > 2*time.Second {
+			t.Fatalf("turn %d did not return promptly: %s", i, elapsed)
+		}
+
+		want := fmt.Sprintf("turn-%d", i)
+		if res.AssistantText != want {
+			t.Fatalf("turn %d AssistantText = %q, want %q", i, res.AssistantText, want)
+		}
 	}
 }
 

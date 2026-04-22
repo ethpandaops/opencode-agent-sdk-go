@@ -60,11 +60,21 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 	vfs := &virtualFS{}
-	cwd, _ := os.Getwd()
+
+	// Run in a dedicated sandbox. opencode's `write` tool writes directly
+	// via Node fs, bypassing our interceptor; pointing cwd at a scratch
+	// dir keeps any non-delegated writes out of the user's workspace.
+	sandbox, err := os.MkdirTemp("", "opencodesdk-fsintercept-*")
+	if err != nil {
+		exitf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(sandbox)
+
+	fmt.Printf("sandbox: %s\n", sandbox)
 
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(logger),
-		opencodesdk.WithCwd(cwd),
+		opencodesdk.WithCwd(sandbox),
 		opencodesdk.WithCanUseTool(opencodesdk.AllowOnce),
 		opencodesdk.WithOnFsWrite(vfs.write),
 	)

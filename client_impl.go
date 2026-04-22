@@ -623,17 +623,16 @@ func (c *client) routeSessionUpdate(ctx context.Context, n acp.SessionNotificati
 	return nil
 }
 
-// instrumentedPermission wraps a PermissionCallback with observability
-// recording. If cb is nil the wrapper is also nil — the dispatcher's
-// default auto-reject path still runs, and we record that too.
+// instrumentedPermission wraps cb with observability. Returns nil when
+// cb is nil so the dispatcher falls through to its default auto-reject
+// path (which picks a "reject" option from the request instead of
+// surfacing a JSON-RPC internal error to the agent).
 func (c *client) instrumentedPermission(cb PermissionCallback) handlers.PermissionCallback {
+	if cb == nil {
+		return nil
+	}
+
 	return func(ctx context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
-		if cb == nil {
-			c.observer.RecordPermission(ctx, "auto_reject")
-
-			return acp.RequestPermissionResponse{}, errNoPermissionCallback
-		}
-
 		resp, err := cb(ctx, req)
 
 		outcome := "error"
@@ -652,43 +651,29 @@ func (c *client) instrumentedPermission(cb PermissionCallback) handlers.Permissi
 	}
 }
 
-// instrumentedFsWrite wraps an FsWriteCallback with observability.
+// instrumentedFsWrite wraps cb with observability. Returns nil when cb
+// is nil so the dispatcher's default "write to disk" path runs.
 func (c *client) instrumentedFsWrite(cb FsWriteCallback) handlers.FsWriteCallback {
+	if cb == nil {
+		return nil
+	}
+
 	return func(ctx context.Context, req acp.WriteTextFileRequest) error {
-		outcome := "default_write"
-		if cb != nil {
-			outcome = "handled"
-		}
-
-		err := func() error {
-			if cb == nil {
-				return errFsDefaultPath
-			}
-
-			return cb(ctx, req)
-		}()
+		err := cb(ctx, req)
 		if err != nil {
-			if errors.Is(err, errFsDefaultPath) {
-				c.observer.RecordFsDelegation(ctx, "write", outcome)
-
-				return nil // signal dispatcher to fall through to its default path
-			}
-
 			c.observer.RecordFsDelegation(ctx, "write", "error")
 
 			return err
 		}
 
-		c.observer.RecordFsDelegation(ctx, "write", outcome)
+		c.observer.RecordFsDelegation(ctx, "write", "handled")
 
 		return nil
 	}
 }
 
 var (
-	errNoPermissionCallback = errors.New("opencodesdk: no permission callback configured")
-	errFsDefaultPath        = errors.New("opencodesdk: fall through to default fs write")
-	errNoLoginLaunch        = errors.New("opencodesdk: no terminal-auth launch instructions to execute")
+	errNoLoginLaunch = errors.New("opencodesdk: no terminal-auth launch instructions to execute")
 )
 
 // maybeRelaunchLoginAndRetry checks whether err represents authRequired

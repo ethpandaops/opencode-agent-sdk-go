@@ -27,11 +27,19 @@ import (
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-	cwd, _ := os.Getwd()
+	// Run in a dedicated sandbox so an approved edit can't escape into
+	// the user's current directory.
+	sandbox, err := os.MkdirTemp("", "opencodesdk-perm-*")
+	if err != nil {
+		exitf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(sandbox)
+
+	fmt.Printf("sandbox: %s\n", sandbox)
 
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(logger),
-		opencodesdk.WithCwd(cwd),
+		opencodesdk.WithCwd(sandbox),
 		opencodesdk.WithCanUseTool(promptTheOperator),
 	)
 	if err != nil {

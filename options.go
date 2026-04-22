@@ -158,8 +158,10 @@ func WithModel(id string) Option {
 // defaults are "build", "plan", "general", "explore", "summarize".
 // Applied via session/set_config_option immediately after session/new.
 //
-// Use "plan" to see session/request_permission prompts for edits; the
-// default "build" agent auto-allows all tool calls.
+// To drive session/request_permission through WithCanUseTool, the user
+// must configure explicit "ask" rules in their opencode.json (see the
+// WithCanUseTool doc). The built-in plan agent denies edits inline
+// rather than asking, so it does not route through the callback path.
 func WithAgent(agent string) Option {
 	return func(o *options) { o.agent = agent }
 }

@@ -1,12 +1,14 @@
-// Demonstrates WithAgent("plan"): opencode's plan agent is the easiest
-// way to observe session/request_permission prompts out of the box. Its
-// permission ruleset is configured as {"edit": "ask", <plansDir>: "allow"}
-// so any edit outside the plans directory prompts the client — the default
-// build agent, by contrast, auto-allows everything.
+// Demonstrates WithAgent("plan"). opencode's plan agent ships with a
+// permission ruleset that DENIES every edit outside the plans directory
+// — it does not route edit requests through session/request_permission.
+// Asking plan to modify a file reliably produces an inline refusal from
+// the model, which is useful when you want a read-only conversation
+// where the agent can reason about changes without applying them.
 //
-// The example pairs WithAgent("plan") with a WithCanUseTool callback that
-// approves every request once so you can see the full request → response
-// round-trip without losing the turn.
+// If you want the interactive ask-path (session/request_permission)
+// instead, use the default `build` agent and set
+// `"permission": {"edit": "ask"}` in ~/.config/opencode/config.json —
+// see examples/permission_callback.
 //
 //	go run ./examples/plan_mode
 package main
@@ -25,13 +27,21 @@ import (
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-	cwd, _ := os.Getwd()
+	// Run in a dedicated sandbox. Plan mode denies edits, but custom
+	// user rules can override; keep any accidental writes out of the
+	// user's workspace.
+	sandbox, err := os.MkdirTemp("", "opencodesdk-plan-*")
+	if err != nil {
+		exitf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(sandbox)
+
+	fmt.Printf("sandbox: %s\n", sandbox)
 
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(logger),
-		opencodesdk.WithCwd(cwd),
+		opencodesdk.WithCwd(sandbox),
 		opencodesdk.WithAgent("plan"),
-		opencodesdk.WithCanUseTool(autoApprove),
 	)
 	if err != nil {
 		exitf("NewClient: %v", err)
@@ -63,7 +73,8 @@ func main() {
 		}
 	}()
 
-	prompt := "Draft a one-file hello.go program and write it to disk. Keep it tiny."
+	prompt := "Draft a one-file hello.go program and write it to disk. " +
+		"If you can't, describe the program and explain why."
 
 	res, err := sess.Prompt(ctx, acp.TextBlock(prompt))
 	if err != nil {
@@ -73,17 +84,6 @@ func main() {
 	time.Sleep(100 * time.Millisecond)
 
 	fmt.Printf("\n\nstop reason: %s\n", res.StopReason)
-}
-
-func autoApprove(ctx context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
-	title := ""
-	if req.ToolCall.Title != nil {
-		title = *req.ToolCall.Title
-	}
-
-	fmt.Printf("\n[permission] auto-approving: %s\n", title)
-
-	return opencodesdk.AllowOnce(ctx, req)
 }
 
 func exitf(format string, args ...any) {

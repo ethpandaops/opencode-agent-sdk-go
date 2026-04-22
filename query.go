@@ -4,9 +4,18 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
 )
+
+// trailingUpdatesGrace caps how long runTurn waits after Session.Prompt
+// returns for any final session/update notifications still in flight.
+// opencode typically delivers them synchronously, but JSON-RPC gives no
+// strict ordering guarantee between the prompt response and the last
+// notification, so a short grace window avoids truncating the final
+// agent_message_chunk.
+const trailingUpdatesGrace = 100 * time.Millisecond
 
 // QueryResult is the aggregated result of a single prompt turn. It is
 // what Query returns and what QueryStream yields per input.
@@ -117,15 +126,32 @@ func QueryStream(ctx context.Context, prompts []string, opts ...Option) iter.Seq
 
 // runTurn executes a single prompt, drains the session's updates
 // channel until the prompt completes, and aggregates a QueryResult.
+//
+// The drain goroutine must exit per-turn so this function works for both
+// single-shot Query (one turn then session teardown) and QueryStream
+// (many turns on a persistent session). We can't rely on the updates
+// channel closing, because opencode keeps it open for the session's
+// lifetime. Instead we signal the goroutine via a stop channel after
+// Prompt returns, giving trailing notifications a brief grace window to
+// land first.
 func runTurn(ctx context.Context, sess Session, blocks ...acp.ContentBlock) (*QueryResult, error) {
 	updates := sess.Updates()
 
+	stop := make(chan struct{})
 	done := make(chan struct{})
 
 	var (
 		notifications []acp.SessionNotification
 		assistantText []byte
 	)
+
+	capture := func(n acp.SessionNotification) {
+		notifications = append(notifications, n)
+
+		if n.Update.AgentMessageChunk != nil && n.Update.AgentMessageChunk.Content.Text != nil {
+			assistantText = append(assistantText, n.Update.AgentMessageChunk.Content.Text.Text...)
+		}
+	}
 
 	go func() {
 		defer close(done)
@@ -134,30 +160,43 @@ func runTurn(ctx context.Context, sess Session, blocks ...acp.ContentBlock) (*Qu
 			select {
 			case <-ctx.Done():
 				return
+			case <-stop:
+				// Drain anything already queued without blocking, then exit.
+				for {
+					select {
+					case n, ok := <-updates:
+						if !ok {
+							return
+						}
+
+						capture(n)
+					default:
+						return
+					}
+				}
 			case n, ok := <-updates:
 				if !ok {
 					return
 				}
 
-				notifications = append(notifications, n)
-
-				if n.Update.AgentMessageChunk != nil && n.Update.AgentMessageChunk.Content.Text != nil {
-					assistantText = append(assistantText, n.Update.AgentMessageChunk.Content.Text.Text...)
-				}
+				capture(n)
 			}
 		}
 	}()
 
 	res, promptErr := sess.Prompt(ctx, blocks...)
 
-	// Give the drain goroutine a brief chance to observe the final
-	// notifications sent by opencode just before the prompt RPC returned.
-	// A tight select keeps the common case near-instant; the context tick
-	// bounds the wait in pathological cases.
+	// Grace window for any trailing session/update notifications still
+	// in flight from opencode. Short-circuits if ctx is already done.
+	grace := time.NewTimer(trailingUpdatesGrace)
 	select {
-	case <-done:
+	case <-grace.C:
 	case <-ctx.Done():
+		grace.Stop()
 	}
+
+	close(stop)
+	<-done
 
 	if promptErr != nil {
 		return nil, promptErr
