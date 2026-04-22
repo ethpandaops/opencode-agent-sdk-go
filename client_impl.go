@@ -79,7 +79,8 @@ func (c *client) Start(ctx context.Context) error {
 		Logger: c.opts.logger,
 		Callbacks: handlers.Callbacks{
 			SessionUpdate: c.routeSessionUpdate,
-			// Permission + FsWrite callbacks land in M4.
+			Permission:    handlers.PermissionCallback(c.opts.canUseTool),
+			FsWrite:       handlers.FsWriteCallback(c.opts.onFsWrite),
 		},
 	}
 

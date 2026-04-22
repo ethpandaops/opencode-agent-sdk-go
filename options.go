@@ -39,6 +39,10 @@ type options struct {
 
 	// Per-session buffering for the updates channel. Zero → default (128).
 	updatesBuffer int
+
+	// Callbacks
+	canUseTool PermissionCallback
+	onFsWrite  FsWriteCallback
 }
 
 // defaultOptions returns the zero-value options with safe defaults.
