@@ -246,7 +246,7 @@ A user of our SDK who wants an auto-launch UX can opt into this with `WithAutoLa
 - `--print-logs` — echo logs to stderr
 - `--log-level DEBUG|INFO|WARN|ERROR`
 - `--pure` — disable plugins
-- `--host 127.0.0.1 --port 0` — important: `opencode acp` boots an internal HTTP server (not for ACP, but for opencode's own internal REST bridge). Pass explicit loopback + ephemeral port to avoid exposing it on LAN. `--mdns` should be off.
+- `--hostname 127.0.0.1 --port 0` — important: `opencode acp` boots an internal HTTP server (not for ACP, but for opencode's own internal REST bridge). Pass explicit loopback + ephemeral port to avoid exposing it on LAN. `--mdns` should be off.
 - `--cors` — additional CORS domains (irrelevant for stdio use)
 
 ---
@@ -323,7 +323,7 @@ Our SDK surfaces this via `Client.AvailableCommands()` (snapshot) and a notifica
 
 ### Other opencode quirks
 
-- opencode's ACP bridge talks to an internal opencode HTTP server over loopback — every action is a local TCP round-trip. Pass `--host 127.0.0.1 --port 0` when spawning.
+- opencode's ACP bridge talks to an internal opencode HTTP server over loopback — every action is a local TCP round-trip. Pass `--hostname 127.0.0.1 --port 0` when spawning.
 - Streaming re-fetches the full message on every delta (`sdk.session.message`). Mild O(n²) server-side work for long outputs. Not our problem but informs timeout tuning.
 - `bash` tool call completion carries full stdout in `content`. No truncation at ACP layer. Large outputs = large notifications.
 - `session/list` uses ms-timestamp-as-cursor internally. Two sessions sharing a ms could be lost across pages (edge case; treat cursor as opaque anyway).
@@ -405,7 +405,7 @@ var ErrCancelled = errors.New("prompt cancelled")
 `internal/subprocess/acp.go`:
 1. Discover `opencode` binary (honor `WithCLIPath`, then `$PATH`).
 2. Verify version via `opencode --version` ≥ 1.14.20 (skippable with option).
-3. Spawn `opencode acp --host 127.0.0.1 --port 0` + user flags. Capture stderr into the logger.
+3. Spawn `opencode acp --hostname 127.0.0.1 --port 0` + user flags. Capture stderr into the logger.
 4. Wire `os.Pipe`s into `coder/acp-go-sdk`'s `ClientSideConnection`.
 5. Run `initialize`; store capabilities + `agentInfo`.
 6. On `Client.Close`, send shutdown, wait for process exit with timeout, then SIGKILL.
@@ -595,7 +595,7 @@ Milestone sizes revised for the thin-wrapper architecture.
 **Milestone 2 — subprocess + ACP client plumbing (1 day)**
 
 - `internal/cli/`: opencode binary discovery, version check ≥ 1.14.20.
-- `internal/subprocess/acp.go`: spawn `opencode acp --host 127.0.0.1 --port 0`, wire stdio into coder SDK's ClientSideConnection, initialize handshake.
+- `internal/subprocess/acp.go`: spawn `opencode acp --hostname 127.0.0.1 --port 0`, wire stdio into coder SDK's ClientSideConnection, initialize handshake.
 - `client.go` + `client_impl.go`: `NewClient`, `Client.Start`, `Client.Close`.
 - `errors.go`: `ErrAuthRequired`, `ErrCancelled`, error wrapping.
 - End state: `Client.Start(ctx)` negotiates initialize and reports capabilities. `Client.Close()` cleanly shuts down.
