@@ -114,15 +114,20 @@ func (c *client) initialize(ctx context.Context) error {
 	initCtx, cancel := context.WithTimeout(ctx, c.opts.initializeTimeout)
 	defer cancel()
 
-	resp, err := c.proc.Conn().Initialize(initCtx, acp.InitializeRequest{
-		ProtocolVersion: acp.ProtocolVersionNumber,
-		ClientCapabilities: acp.ClientCapabilities{
-			Fs: acp.FileSystemCapabilities{
-				ReadTextFile:  true,
-				WriteTextFile: true,
-			},
-			Terminal: false,
+	caps := acp.ClientCapabilities{
+		Fs: acp.FileSystemCapabilities{
+			ReadTextFile:  true,
+			WriteTextFile: true,
 		},
+		Terminal: false,
+	}
+	if c.opts.terminalAuthCapability {
+		caps.Meta = map[string]any{"terminal-auth": true}
+	}
+
+	resp, err := c.proc.Conn().Initialize(initCtx, acp.InitializeRequest{
+		ProtocolVersion:    acp.ProtocolVersionNumber,
+		ClientCapabilities: caps,
 	})
 	if err != nil {
 		return wrapACPErr(err)
@@ -190,6 +195,19 @@ func (c *client) AgentInfo() acp.Implementation {
 	defer c.mu.Unlock()
 
 	return c.agentInfo
+}
+
+// AuthMethods returns the authentication methods the agent advertised
+// during Start.
+func (c *client) AuthMethods() []acp.AuthMethod {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Return a copy to prevent caller mutation of our internal state.
+	out := make([]acp.AuthMethod, len(c.authMethods))
+	copy(out, c.authMethods)
+
+	return out
 }
 
 // NewSession creates a new opencode session.

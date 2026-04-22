@@ -43,6 +43,9 @@ type options struct {
 	// Callbacks
 	canUseTool PermissionCallback
 	onFsWrite  FsWriteCallback
+
+	// Auth
+	terminalAuthCapability bool
 }
 
 // defaultOptions returns the zero-value options with safe defaults.
@@ -160,4 +163,16 @@ func WithMCPServers(servers ...acp.McpServer) Option {
 // Default: 128.
 func WithUpdatesBuffer(n int) Option {
 	return func(o *options) { o.updatesBuffer = n }
+}
+
+// WithTerminalAuthCapability advertises _meta["terminal-auth"]=true in
+// the initialize handshake's ClientCapabilities. On opencode this
+// causes AuthMethod entries to include a _meta["terminal-auth"] block
+// with launch instructions (Command, Args, Env, Label). Use
+// TerminalAuthInstructions to extract them, and AgentInfo + AuthMethods
+// accessors to inspect them.
+//
+// This is a no-op for agents that don't honor the capability. Default: false.
+func WithTerminalAuthCapability(enabled bool) Option {
+	return func(o *options) { o.terminalAuthCapability = enabled }
 }

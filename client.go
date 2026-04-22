@@ -27,6 +27,12 @@ type Client interface {
 	// during Start.
 	AgentInfo() acp.Implementation
 
+	// AuthMethods returns the authentication methods the agent
+	// advertised during initialize. Inspect TerminalAuthInstructions
+	// on each method if you advertised _meta["terminal-auth"] via
+	// WithTerminalAuthCapability.
+	AuthMethods() []acp.AuthMethod
+
 	// NewSession creates a new opencode session. If WithModel or
 	// WithAgent are configured (either as client-level options passed
 	// to NewClient or as per-call options passed here), they are
