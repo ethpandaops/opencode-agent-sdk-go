@@ -12,8 +12,8 @@ func TestContentBlockConstructors(t *testing.T) {
 		t.Fatalf("TextBlock did not populate .Text")
 	}
 
-	img := ImageBlock("iVBORw0K", "image/png")
-	if img.Image == nil || img.Image.MimeType != "image/png" {
+	img := ImageBlock("iVBORw0K", mimePNG)
+	if img.Image == nil || img.Image.MimeType != mimePNG {
 		t.Fatalf("ImageBlock did not populate .Image")
 	}
 

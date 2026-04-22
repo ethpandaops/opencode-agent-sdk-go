@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,7 +47,13 @@ func (f *fakeSession) SetModel(ctx context.Context, m string) error {
 	return nil
 }
 
-func (f *fakeSession) SetMode(_ context.Context, _ string) error       { return nil }
+func (f *fakeSession) SetMode(_ context.Context, _ string) error { return nil }
+
+func (f *fakeSession) SetConfigOption(_ context.Context, _, _ string) error { return nil }
+
+func (f *fakeSession) SetConfigOptionBool(_ context.Context, _ string, _ bool) error {
+	return nil
+}
 func (f *fakeSession) InitialModels() *acp.SessionModelState           { return nil }
 func (f *fakeSession) InitialModes() *acp.SessionModeState             { return f.initModes }
 func (f *fakeSession) InitialConfigOptions() []acp.SessionConfigOption { return nil }
@@ -188,10 +195,12 @@ func TestRunTurn_CtxCancelledDuringPromptReturnsPromptErr(t *testing.T) {
 // for the whole session lifetime, so multi-turn callers (QueryStream)
 // hung indefinitely between turns.
 func TestRunTurn_ReturnsWhenUpdatesChannelStaysOpen(t *testing.T) {
+	const wantText = "ok"
+
 	s := newFakeSession(8)
 
 	s.prompt = func(_ context.Context, _ ...acp.ContentBlock) (*PromptResult, error) {
-		s.updates <- chunkNotification(s.id, "ok")
+		s.updates <- chunkNotification(s.id, wantText)
 
 		// Intentionally do NOT close s.updates — the session lives on.
 		return &PromptResult{StopReason: acp.StopReasonEndTurn}, nil
@@ -213,8 +222,8 @@ func TestRunTurn_ReturnsWhenUpdatesChannelStaysOpen(t *testing.T) {
 		t.Fatalf("runTurn did not return promptly: %s", elapsed)
 	}
 
-	if res.AssistantText != "ok" {
-		t.Fatalf("AssistantText = %q, want %q", res.AssistantText, "ok")
+	if res.AssistantText != wantText {
+		t.Fatalf("AssistantText = %q, want %q", res.AssistantText, wantText)
 	}
 }
 
@@ -325,4 +334,166 @@ func TestQueryResult_FieldsZeroed(t *testing.T) {
 	if r.SessionID != "" || r.AssistantText != "" || r.StopReason != "" || r.Usage != nil || r.Notifications != nil {
 		t.Fatalf("QueryResult zero-value unexpectedly populated: %+v", r)
 	}
+}
+
+// TestQueryContent_EmptyBlocksRejected sanity-checks the input-validation
+// path. The rejection is cheap (no subprocess / transport involved).
+func TestQueryContent_EmptyBlocksRejected(t *testing.T) {
+	_, err := QueryContent(t.Context(), nil)
+	if err == nil {
+		t.Fatalf("expected error for empty blocks")
+	}
+}
+
+// TestQueryContent_EndToEndWithTransport proves the full multimodal
+// one-shot flow runs through a WithTransport-backed fake, including
+// forwarding the content blocks verbatim to the agent's Prompt method.
+func TestQueryContent_EndToEndWithTransport(t *testing.T) {
+	var seenBlocks []acp.ContentBlock
+
+	agent := &fakeAgent{
+		initialize: func(_ context.Context, _ acp.InitializeRequest) (acp.InitializeResponse, error) {
+			return acp.InitializeResponse{
+				ProtocolVersion: acp.ProtocolVersionNumber,
+				AgentInfo:       &acp.Implementation{Name: "fake", Version: "0.0.0"},
+				AgentCapabilities: acp.AgentCapabilities{
+					LoadSession: true,
+					PromptCapabilities: acp.PromptCapabilities{
+						Image:           true,
+						EmbeddedContext: true,
+					},
+				},
+			}, nil
+		},
+	}
+
+	promptAgent := &promptCapturingAgent{fakeAgent: agent, seenBlocks: &seenBlocks}
+
+	factory := func(_ context.Context, handler acp.Client) (Transport, error) {
+		return newPipeTransport(handler, promptAgent), nil
+	}
+
+	blocks := Blocks(TextBlock("describe this"), ImageBlock("aGVsbG8=", "image/png"))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	result, err := QueryContent(ctx, blocks,
+		WithTransport(factory),
+		WithSkipVersionCheck(true),
+		WithCwd("/tmp"),
+	)
+	if err != nil {
+		t.Fatalf("QueryContent: %v", err)
+	}
+
+	if result.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("StopReason = %q, want %q", result.StopReason, acp.StopReasonEndTurn)
+	}
+
+	if len(seenBlocks) != 2 {
+		t.Fatalf("agent saw %d blocks, want 2: %+v", len(seenBlocks), seenBlocks)
+	}
+
+	if seenBlocks[0].Text == nil || seenBlocks[0].Text.Text != "describe this" {
+		t.Fatalf("first block not text: %+v", seenBlocks[0])
+	}
+
+	if seenBlocks[1].Image == nil || seenBlocks[1].Image.MimeType != "image/png" {
+		t.Fatalf("second block not image: %+v", seenBlocks[1])
+	}
+}
+
+// TestQueryStreamContent_RunsEachPrompt exercises the multi-prompt
+// iterator path end-to-end, proving (a) one QueryResult is yielded per
+// prompt in input order, (b) each prompt's blocks reach the agent, and
+// (c) the subprocess / transport is torn down on natural iterator exit.
+func TestQueryStreamContent_RunsEachPrompt(t *testing.T) {
+	var mu sync.Mutex
+
+	var received [][]acp.ContentBlock
+
+	agent := &promptCapturingAgent{
+		fakeAgent: &fakeAgent{},
+	}
+
+	agent.onPrompt = func(blocks []acp.ContentBlock) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		cp := make([]acp.ContentBlock, len(blocks))
+		copy(cp, blocks)
+		received = append(received, cp)
+	}
+
+	factory := func(_ context.Context, handler acp.Client) (Transport, error) {
+		return newPipeTransport(handler, agent), nil
+	}
+
+	prompts := [][]acp.ContentBlock{
+		{TextBlock("one")},
+		{TextBlock("two")},
+		{TextBlock("three")},
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	count := 0
+
+	for res, err := range QueryStreamContent(ctx, PromptsFromSlice(prompts),
+		WithTransport(factory),
+		WithSkipVersionCheck(true),
+		WithCwd("/tmp"),
+	) {
+		if err != nil {
+			t.Fatalf("iter err at count %d: %v", count, err)
+		}
+
+		if res == nil {
+			t.Fatalf("nil result at count %d", count)
+		}
+
+		count++
+	}
+
+	if count != 3 {
+		t.Fatalf("yielded %d results, want 3", count)
+	}
+
+	mu.Lock()
+
+	defer mu.Unlock()
+
+	if len(received) != 3 {
+		t.Fatalf("agent saw %d prompts, want 3", len(received))
+	}
+
+	for i, want := range []string{"one", "two", "three"} {
+		if received[i][0].Text == nil || received[i][0].Text.Text != want {
+			t.Fatalf("prompt %d reached agent as %+v, want %q", i, received[i], want)
+		}
+	}
+}
+
+// promptCapturingAgent wraps fakeAgent so tests can observe the content
+// blocks sent via session/prompt without reimplementing the full Agent
+// interface each time.
+type promptCapturingAgent struct {
+	*fakeAgent
+
+	seenBlocks *[]acp.ContentBlock
+	onPrompt   func(blocks []acp.ContentBlock)
+}
+
+func (p *promptCapturingAgent) Prompt(_ context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+	if p.seenBlocks != nil {
+		*p.seenBlocks = append(*p.seenBlocks, params.Prompt...)
+	}
+
+	if p.onPrompt != nil {
+		p.onPrompt(params.Prompt)
+	}
+
+	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
 }

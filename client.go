@@ -51,20 +51,30 @@ type Client interface {
 	// load the session's associated credentials.
 	LoadSession(ctx context.Context, id string, opts ...Option) (Session, error)
 
+	// LoadSessionHistory loads an existing session and captures the
+	// replay notifications opencode emits during session/load into a
+	// typed SessionHistory. Prefer this over LoadSession when the
+	// caller wants the full historical transcript as a slice rather
+	// than streaming replay via Updates().
+	//
+	// The returned Session is ready for further Prompt/Cancel calls;
+	// its Updates() channel carries only post-replay notifications.
+	LoadSessionHistory(ctx context.Context, id string, opts ...Option) (*SessionHistory, error)
+
 	// ListSessions enumerates sessions scoped to the configured cwd.
 	// Cursor is opaque; pass the return value's NextCursor to paginate.
 	ListSessions(ctx context.Context, cursor string) (sessions []SessionInfo, nextCursor string, err error)
 
 	// ForkSession creates a new session branched from an existing one
-	// (opencode unstable_forkSession RPC).
+	// (ACP's unstable `session/fork` RPC).
 	ForkSession(ctx context.Context, parentID string, opts ...Option) (Session, error)
 
 	// ResumeSession re-attaches to an existing session without the
-	// history-replay side effects of LoadSession (opencode
-	// unstable_resumeSession RPC).
+	// history-replay side effects of LoadSession (ACP's unstable
+	// `session/resume` RPC).
 	ResumeSession(ctx context.Context, sessionID string, opts ...Option) (Session, error)
 
-	// UnstableSetModel issues opencode's unstable_setSessionModel RPC
+	// UnstableSetModel issues ACP's unstable `session/set_model` RPC
 	// directly. Prefer Session.SetModel for normal use.
 	UnstableSetModel(ctx context.Context, sessionID, modelID string) error
 
@@ -84,6 +94,16 @@ type Client interface {
 	// this only for opencode- or agent-specific extensions that the
 	// SDK does not yet expose.
 	CallExtension(ctx context.Context, method string, params any) (json.RawMessage, error)
+
+	// GetTransportHealth returns a snapshot of the transport-layer
+	// health observed so far. Cheap to call; intended for dashboards,
+	// liveness probes, and diagnostics.
+	GetTransportHealth() TransportHealth
+
+	// BudgetTracker returns the tracker installed via
+	// WithMaxBudgetUSD or WithBudgetTracker. Returns nil when no
+	// budget policy was configured.
+	BudgetTracker() *BudgetTracker
 }
 
 // NewClient creates a new, un-started Client configured with the given

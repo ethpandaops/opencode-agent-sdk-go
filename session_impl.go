@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -266,7 +267,8 @@ func dispatchSubscribers(ctx context.Context, subs []UpdateHandlers, n acp.Sessi
 }
 
 // observeInLock captures cacheable and observable signals from a
-// notification. Caller must hold s.mu.
+// notification. Caller must hold s.mu. Fires Pre/PostToolUse hooks
+// synchronously on tool-call lifecycle transitions.
 func (s *session) observeInLock(n acp.SessionNotification) {
 	ctx := context.Background()
 
@@ -283,7 +285,10 @@ func (s *session) observeInLock(n acp.SessionNotification) {
 			kind:    string(tc.Kind),
 		}
 
+		s.fireHookPreToolUse(ctx, tc)
+
 		if isTerminalToolCallStatus(tc.Status) {
+			s.fireHookPostToolUseFromToolCall(ctx, tc)
 			s.emitToolCallTerminal(ctx, tc.ToolCallId, tc.Title, string(tc.Kind), string(tc.Status))
 		}
 
@@ -303,12 +308,81 @@ func (s *session) observeInLock(n acp.SessionNotification) {
 			kind = string(*tcu.Kind)
 		}
 
+		s.fireHookPostToolUseFromUpdate(ctx, tcu)
 		s.emitToolCallTerminal(ctx, tcu.ToolCallId, name, kind, string(*tcu.Status))
 
 	case n.Update.UsageUpdate != nil && n.Update.UsageUpdate.Cost != nil:
 		cost := n.Update.UsageUpdate.Cost
 		s.client.observer.RecordCost(ctx, cost.Amount, cost.Currency, s.currentModel)
 	}
+}
+
+// fireHookPreToolUse runs HookEventPreToolUse. Notification-only.
+func (s *session) fireHookPreToolUse(ctx context.Context, tc *acp.SessionUpdateToolCall) {
+	if s.client.hooks == nil {
+		return
+	}
+
+	_, _ = s.client.hooks.dispatch(ctx, HookEventPreToolUse, tc.Title, HookInput{
+		Event:     HookEventPreToolUse,
+		SessionID: string(s.id),
+		ToolCall:  tc,
+	})
+}
+
+// fireHookPostToolUseFromToolCall runs HookEventPostToolUse or
+// HookEventPostToolUseFailure depending on tc.Status. Fires when a
+// ToolCall notification arrives already in a terminal state.
+func (s *session) fireHookPostToolUseFromToolCall(ctx context.Context, tc *acp.SessionUpdateToolCall) {
+	if s.client.hooks == nil {
+		return
+	}
+
+	event := HookEventPostToolUse
+	if tc.Status == acp.ToolCallStatusFailed {
+		event = HookEventPostToolUseFailure
+	}
+
+	// Synthesise a ToolCallUpdate from the terminal ToolCall for the
+	// hook payload so every PostToolUse observer sees the same shape.
+	status := tc.Status
+	title := tc.Title
+	kind := tc.Kind
+	synthUpd := &acp.SessionToolCallUpdate{
+		ToolCallId: tc.ToolCallId,
+		Title:      &title,
+		Kind:       &kind,
+		Status:     &status,
+		Content:    tc.Content,
+		RawInput:   tc.RawInput,
+		RawOutput:  tc.RawOutput,
+		Locations:  tc.Locations,
+	}
+
+	_, _ = s.client.hooks.dispatch(ctx, event, tc.Title, HookInput{
+		Event:          event,
+		SessionID:      string(s.id),
+		ToolCallUpdate: synthUpd,
+	})
+}
+
+// fireHookPostToolUseFromUpdate runs HookEventPostToolUse or
+// HookEventPostToolUseFailure based on tcu.Status.
+func (s *session) fireHookPostToolUseFromUpdate(ctx context.Context, tcu *acp.SessionToolCallUpdate) {
+	if s.client.hooks == nil || tcu.Status == nil {
+		return
+	}
+
+	event := HookEventPostToolUse
+	if *tcu.Status == acp.ToolCallStatusFailed {
+		event = HookEventPostToolUseFailure
+	}
+
+	_, _ = s.client.hooks.dispatch(ctx, event, deref(tcu.Title), HookInput{
+		Event:          event,
+		SessionID:      string(s.id),
+		ToolCallUpdate: tcu,
+	})
 }
 
 // emitToolCallTerminal records the terminal tool_call event and clears
@@ -366,6 +440,31 @@ func (s *session) Prompt(ctx context.Context, blocks ...acp.ContentBlock) (*Prom
 		return nil, err
 	}
 
+	// HookEventUserPromptSubmit: blocking-capable. A hook returning
+	// Continue=false short-circuits the prompt before it reaches
+	// opencode.
+	promptText := extractPromptText(blocks)
+
+	if s.client.hooks != nil {
+		decision, hookErr := s.client.hooks.dispatch(ctx, HookEventUserPromptSubmit, promptText, HookInput{
+			Event:      HookEventUserPromptSubmit,
+			SessionID:  string(s.id),
+			PromptText: promptText,
+		})
+		if hookErr != nil {
+			return nil, fmt.Errorf("%w: %w", ErrHookRejected, hookErr)
+		}
+
+		if !decision.Continue {
+			reason := decision.Reason
+			if reason == "" {
+				reason = "hook rejected prompt"
+			}
+
+			return nil, fmt.Errorf("%w: %s", ErrHookRejected, reason)
+		}
+	}
+
 	// Reset cancelIntended at entry: a stray Cancel() call before any
 	// Prompt runs would otherwise leave the flag sticky and misclassify
 	// the next unrelated error as ErrCancelled.
@@ -401,13 +500,13 @@ func (s *session) Prompt(ctx context.Context, blocks ...acp.ContentBlock) (*Prom
 			cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second) //nolint:contextcheck // intentional: cancel requires a live ctx
 			defer cancel()
 
-			if err := s.client.proc.Conn().Cancel(cancelCtx, acp.CancelNotification{SessionId: s.id}); err != nil {
+			if err := s.client.transport.Conn().Cancel(cancelCtx, acp.CancelNotification{SessionId: s.id}); err != nil {
 				s.logger.Debug("send session/cancel failed", slog.Any("error", err))
 			}
 		}
 	}()
 
-	resp, err := s.client.proc.Conn().Prompt(ctx, acp.PromptRequest{
+	resp, err := s.client.transport.Conn().Prompt(ctx, acp.PromptRequest{
 		SessionId: s.id,
 		Prompt:    blocks,
 	})
@@ -442,16 +541,51 @@ func (s *session) Prompt(ctx context.Context, blocks ...acp.ContentBlock) (*Prom
 	return result, nil
 }
 
-// fireTurnComplete invokes the client's WithOnTurnComplete callback, if
-// any. Split out so both success and error paths can call it without
-// duplicating the nil-check.
+// fireTurnComplete invokes the client's WithOnTurnComplete callback
+// and the matching Stop / StopFailure hooks. Split out so both the
+// success and error paths run the same bookkeeping.
 func (s *session) fireTurnComplete(ctx context.Context, result *PromptResult, err error) {
+	if s.client.hooks != nil {
+		event := HookEventStop
+		input := HookInput{
+			Event:        HookEventStop,
+			SessionID:    string(s.id),
+			PromptResult: result,
+		}
+
+		if err != nil {
+			event = HookEventStopFailure
+			input = HookInput{
+				Event:       HookEventStopFailure,
+				SessionID:   string(s.id),
+				PromptError: err,
+			}
+		}
+
+		_, _ = s.client.hooks.dispatch(ctx, event, string(s.id), input)
+	}
+
 	cb := s.client.opts.onTurnComplete
 	if cb == nil {
 		return
 	}
 
 	cb(ctx, string(s.id), result, err)
+}
+
+// extractPromptText concatenates the .Text of every TextBlock in a
+// prompt's content blocks. Used for hook matching on
+// UserPromptSubmit; non-text blocks are skipped.
+func extractPromptText(blocks []acp.ContentBlock) string {
+	var parts []string
+
+	for _, b := range blocks {
+		if b.Text != nil {
+			parts = append(parts, b.Text.Text)
+		}
+	}
+
+	return strings.Join(parts, "\n")
 }
 
 // tokensFromUsage extracts the Observer's TokenCounts from an
@@ -487,7 +621,7 @@ func (s *session) Cancel(ctx context.Context) error {
 	s.cancelIntended = true
 	s.mu.Unlock()
 
-	return s.client.proc.Conn().Cancel(ctx, acp.CancelNotification{SessionId: s.id})
+	return s.client.transport.Conn().Cancel(ctx, acp.CancelNotification{SessionId: s.id})
 }
 
 // SetModel maps to session/set_config_option with configId="model".
@@ -517,11 +651,52 @@ func (s *session) SetMode(ctx context.Context, modeID string) error {
 }
 
 func (s *session) setConfigOption(ctx context.Context, configID, value string) error {
-	_, err := s.client.proc.Conn().SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+	_, err := s.client.transport.Conn().SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
 		ValueId: &acp.SetSessionConfigOptionValueId{
 			SessionId: s.id,
 			ConfigId:  acp.SessionConfigId(configID),
 			Value:     acp.SessionConfigValueId(value),
+		},
+	})
+	if err != nil {
+		return wrapACPErr(err)
+	}
+
+	return nil
+}
+
+// SetConfigOption is the generic string-valued session/set_config_option
+// RPC. See Session.SetConfigOption.
+func (s *session) SetConfigOption(ctx context.Context, configID, value string) error {
+	if err := s.setConfigOption(ctx, configID, value); err != nil {
+		return err
+	}
+
+	// Keep the cached observability labels in sync for the two options
+	// we mirror on the session struct. Other config ids are opaque.
+	switch configID {
+	case "model":
+		s.mu.Lock()
+		s.currentModel = value
+		s.mu.Unlock()
+	case "mode":
+		s.mu.Lock()
+		s.currentMode = value
+		s.mu.Unlock()
+	}
+
+	return nil
+}
+
+// SetConfigOptionBool is the generic boolean-valued
+// session/set_config_option RPC.
+func (s *session) SetConfigOptionBool(ctx context.Context, configID string, value bool) error {
+	_, err := s.client.transport.Conn().SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+		Boolean: &acp.SetSessionConfigOptionBoolean{
+			SessionId: s.id,
+			ConfigId:  acp.SessionConfigId(configID),
+			Type:      "boolean",
+			Value:     value,
 		},
 	})
 	if err != nil {

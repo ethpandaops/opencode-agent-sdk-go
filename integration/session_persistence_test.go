@@ -139,6 +139,70 @@ func TestSessionPersistence_LoadSessionReplay(t *testing.T) {
 	}
 }
 
+// TestSessionPersistence_LoadSessionHistory loads an existing session
+// via the history helper and asserts that the typed SessionHistory
+// carries at least one replayed message.
+func TestSessionPersistence_LoadSessionHistory(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	cwd := tempCwd(t)
+
+	var sid string
+
+	err := opencodesdk.WithClient(ctx, func(c opencodesdk.Client) error {
+		sess, err := c.NewSession(ctx)
+		if err != nil {
+			return err
+		}
+
+		sid = sess.ID()
+
+		_, err = sess.Prompt(ctx, acp.TextBlock("Reply with the single word: violet."))
+
+		return err
+	},
+		opencodesdk.WithLogger(testLogger(t)),
+		opencodesdk.WithCwd(cwd),
+	)
+	if err != nil {
+		skipIfCLIUnavailable(t, err)
+		skipIfAuthRequired(t, err)
+		t.Fatalf("WithClient (create): %v", err)
+	}
+
+	err = opencodesdk.WithClient(ctx, func(c opencodesdk.Client) error {
+		history, loadErr := c.LoadSessionHistory(ctx, sid)
+		if loadErr != nil {
+			return loadErr
+		}
+
+		if history.Session.ID() != sid {
+			t.Fatalf("history.Session.ID = %q, want %q", history.Session.ID(), sid)
+		}
+
+		if len(history.Notifications) == 0 {
+			t.Fatalf("SessionHistory.Notifications is empty; expected replay")
+		}
+
+		t.Logf("history: notifications=%d messages=%d", len(history.Notifications), len(history.Messages))
+
+		for i, m := range history.Messages {
+			t.Logf("  [%d] %s: %s", i, m.Role, truncate(m.Text, 80))
+		}
+
+		return nil
+	},
+		opencodesdk.WithLogger(testLogger(t)),
+		opencodesdk.WithCwd(cwd),
+	)
+	if err != nil {
+		skipIfCLIUnavailable(t, err)
+		skipIfAuthRequired(t, err)
+		t.Fatalf("WithClient (load history): %v", err)
+	}
+}
+
 // TestSessionPersistence_ListSessionsPagination verifies that a cursor
 // is returned (or empty) and pagination works when > a page of sessions
 // exists. This is a smoke test only; we don't create dozens of sessions.

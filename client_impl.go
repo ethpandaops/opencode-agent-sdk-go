@@ -8,10 +8,12 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ethpandaops/opencode-agent-sdk-go/internal/cli"
@@ -30,7 +32,7 @@ type client struct {
 	mu             sync.Mutex
 	started        bool
 	closed         bool
-	proc           *subprocess.Process
+	transport      Transport
 	dispatcher     *handlers.Dispatcher
 	agentCaps      acp.AgentCapabilities
 	agentInfo      acp.Implementation
@@ -52,6 +54,8 @@ type client struct {
 	bridge *bridge.Bridge
 
 	observer *observability.Observer
+	health   healthTracker
+	hooks    *hookDispatcher
 
 	// watchOnce guards the subprocess crash-monitor goroutine.
 	watchOnce sync.Once
@@ -65,16 +69,46 @@ type client struct {
 const pendingUpdatesCap = 64
 
 func newClient(o *options) (*client, error) {
+	mp, err := resolveMeterProvider(o)
+	if err != nil {
+		return nil, err
+	}
+
 	return &client{
 		opts:           o,
 		sessions:       make(map[acp.SessionId]*session),
 		pendingUpdates: make(map[acp.SessionId][]acp.SessionNotification),
-		observer:       observability.NewObserver(o.meterProvider, o.tracerProvider),
+		observer:       observability.NewObserver(mp, o.tracerProvider),
+		hooks:          newHookDispatcher(o.hooks),
 	}, nil
 }
 
-// Start spawns the opencode subprocess and runs the ACP initialize
-// handshake.
+// resolveMeterProvider materialises a MeterProvider from the
+// configured options. If WithMeterProvider was supplied it wins.
+// Otherwise, if WithPrometheusRegisterer was supplied we construct a
+// Prometheus-backed provider. Otherwise the returned provider is nil
+// (Observer falls back to the OTel global provider, which is a noop
+// unless the application installs one).
+func resolveMeterProvider(o *options) (metric.MeterProvider, error) {
+	switch {
+	case o.meterProvider != nil:
+		return o.meterProvider, nil
+	case o.promRegisterer != nil:
+		mp, err := observability.NewPrometheusMeterProvider(o.promRegisterer)
+		if err != nil {
+			return nil, fmt.Errorf("opencodesdk: configure prometheus meter provider: %w", err)
+		}
+
+		return mp, nil
+	default:
+		// Explicit noop MeterProvider would also work; nil lets the
+		// Observer pick up the OTel global provider.
+		return nil, nil //nolint:nilnil // both-nil is the "use global" signal
+	}
+}
+
+// Start spawns the opencode subprocess (or runs the registered
+// WithTransport factory) and runs the ACP initialize handshake.
 func (c *client) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -86,28 +120,6 @@ func (c *client) Start(ctx context.Context) error {
 	if c.closed {
 		return ErrClientClosed
 	}
-
-	path, version, err := (&cli.Discoverer{
-		Path:             c.opts.cliPath,
-		SkipVersionCheck: c.opts.skipVersionCheck,
-		MinimumVersion:   MinimumCLIVersion,
-		Logger:           c.opts.logger,
-	}).Discover(ctx)
-	if err != nil {
-		switch {
-		case errors.Is(err, cli.ErrNotFound):
-			return fmt.Errorf("%w: %v", ErrCLINotFound, err)
-		case errors.Is(err, cli.ErrUnsupportedVersion):
-			return fmt.Errorf("%w: %v", ErrUnsupportedCLIVersion, err)
-		default:
-			return fmt.Errorf("discovering opencode CLI: %w", err)
-		}
-	}
-
-	c.opts.logger.InfoContext(ctx, "opencode CLI discovered",
-		slog.String("path", path),
-		slog.String("version", version),
-	)
 
 	c.dispatcher = &handlers.Dispatcher{
 		Logger: c.opts.logger,
@@ -133,31 +145,16 @@ func (c *client) Start(ctx context.Context) error {
 		c.bridge = br
 	}
 
-	// Subprocess span covers the child's lifetime — ended in Close.
-	_, c.subprocessSpan = c.observer.StartSubprocessSpan(ctx, path)
-
-	proc, err := subprocess.Spawn(ctx, subprocess.Config{
-		Path:           path,
-		Args:           c.opts.cliFlags,
-		Env:            c.opts.env,
-		Cwd:            c.opts.cwd,
-		Logger:         c.opts.logger,
-		StderrCallback: c.opts.stderr,
-	}, c.dispatcher)
+	tr, err := c.buildTransport(ctx)
 	if err != nil {
-		c.observer.RecordCLISpawn(ctx, "error")
-		c.subprocessSpan.End()
-		c.subprocessSpan = nil
-
-		return fmt.Errorf("spawning opencode acp: %w", err)
+		return err
 	}
 
-	c.observer.RecordCLISpawn(ctx, "started")
-	c.proc = proc
+	c.transport = tr
 
 	if err := c.initialize(ctx); err != nil {
-		_ = c.proc.Close()
-		c.proc = nil
+		_ = c.transport.Close()
+		c.transport = nil
 
 		return fmt.Errorf("ACP initialize: %w", err)
 	}
@@ -169,19 +166,95 @@ func (c *client) Start(ctx context.Context) error {
 	return nil
 }
 
+// buildTransport returns the Transport to use for this Client. When a
+// WithTransport factory is configured, CLI discovery and subprocess
+// spawn are skipped entirely. Otherwise the default subprocess-backed
+// transport is returned.
+func (c *client) buildTransport(ctx context.Context) (Transport, error) {
+	if c.opts.transportFactory != nil {
+		tr, err := c.opts.transportFactory(ctx, c.dispatcher)
+		if err != nil {
+			return nil, fmt.Errorf("opencodesdk: transport factory: %w", err)
+		}
+
+		if tr == nil {
+			return nil, errors.New("opencodesdk: transport factory returned nil transport")
+		}
+
+		_, c.subprocessSpan = c.observer.StartSubprocessSpan(ctx, "custom")
+
+		return tr, nil
+	}
+
+	path, version, err := (&cli.Discoverer{
+		Path:             c.opts.cliPath,
+		SkipVersionCheck: c.opts.skipVersionCheck,
+		MinimumVersion:   MinimumCLIVersion,
+		Logger:           c.opts.logger,
+	}).Discover(ctx)
+	if err != nil {
+		switch {
+		case errors.Is(err, cli.ErrNotFound):
+			searched := []string{"$PATH"}
+			if c.opts.cliPath != "" {
+				searched = []string{c.opts.cliPath}
+			}
+
+			return nil, &CLINotFoundError{SearchedPaths: searched, Err: err}
+		case errors.Is(err, cli.ErrUnsupportedVersion):
+			return nil, fmt.Errorf("%w: %v", ErrUnsupportedCLIVersion, err)
+		default:
+			return nil, fmt.Errorf("discovering opencode CLI: %w", err)
+		}
+	}
+
+	c.opts.logger.InfoContext(ctx, "opencode CLI discovered",
+		slog.String("path", path),
+		slog.String("version", version),
+	)
+
+	// Subprocess span covers the child's lifetime — ended in Close.
+	_, c.subprocessSpan = c.observer.StartSubprocessSpan(ctx, path)
+
+	proc, err := subprocess.Spawn(ctx, subprocess.Config{
+		Path:           path,
+		Args:           c.opts.cliFlags,
+		Env:            subprocessEnv(c.opts),
+		Cwd:            c.opts.cwd,
+		Logger:         c.opts.logger,
+		StderrCallback: c.opts.stderr,
+	}, c.dispatcher)
+	if err != nil {
+		c.observer.RecordCLISpawn(ctx, "error")
+		c.subprocessSpan.End()
+		c.subprocessSpan = nil
+
+		return nil, fmt.Errorf("spawning opencode acp: %w", err)
+	}
+
+	c.observer.RecordCLISpawn(ctx, "started")
+
+	return proc, nil
+}
+
 // watchSubprocess fires when opencode exits unexpectedly mid-session.
 // It logs the cause, closes every live session (so callers blocked on
 // Updates() or a Prompt unblock), and leaves the client in the closed
 // state so subsequent RPCs return ErrClientClosed instead of hanging.
+//
+// Transports that don't implement WatchableTransport (e.g. test
+// doubles backed by an in-memory pipe) skip this watcher entirely —
+// those transports have no notion of "exited" and are tied to the
+// caller's own lifetime.
 func (c *client) watchSubprocess() {
-	proc := c.proc
-	if proc == nil {
+	watch, ok := c.transport.(WatchableTransport)
+	if !ok {
 		return
 	}
 
-	<-proc.Exited()
+	<-watch.Exited()
 
-	err := proc.ExitErr()
+	err := watch.ExitErr()
 
 	c.mu.Lock()
 	closing := c.closed
@@ -193,9 +266,14 @@ func (c *client) watchSubprocess() {
 
 	if err != nil {
 		c.opts.logger.Error("opencode acp exited unexpectedly", slog.Any("error", err))
+		c.health.recordFailure("subprocess", err.Error())
 	} else {
 		c.opts.logger.Warn("opencode acp exited unexpectedly (no error reported)")
+		c.health.recordFailure("subprocess", "opencode acp exited unexpectedly")
 	}
+
+	c.observer.RecordTransportFailure(context.Background(), "subprocess")
+	c.health.markDegraded()
 
 	// Close all live sessions so their Updates channels drain and any
 	// blocked Prompt calls unwind through context cancellation.
@@ -234,7 +312,7 @@ func (c *client) initialize(ctx context.Context) error {
 		caps.Meta = map[string]any{"terminal-auth": true}
 	}
 
-	resp, err := c.proc.Conn().Initialize(spanCtx, acp.InitializeRequest{
+	resp, err := c.transport.Conn().Initialize(spanCtx, acp.InitializeRequest{
 		ProtocolVersion:    acp.ProtocolVersionNumber,
 		ClientCapabilities: caps,
 	})
@@ -273,19 +351,26 @@ func (c *client) Close() error {
 	}
 
 	c.closed = true
-	proc := c.proc
+	proc := c.transport
 	c.mu.Unlock()
 
 	// Tear down all live sessions first so their updates channels close.
 	c.sessionsMu.Lock()
 
+	ids := make([]string, 0, len(c.sessions))
+
 	for _, s := range c.sessions {
+		ids = append(ids, s.ID())
 		s.close()
 	}
 
 	c.sessions = map[acp.SessionId]*session{}
 
 	c.sessionsMu.Unlock()
+
+	for _, id := range ids {
+		c.fireHookSessionEnd(context.Background(), id)
+	}
 
 	if c.bridge != nil {
 		if err := c.bridge.Close(context.Background()); err != nil {
@@ -321,6 +406,17 @@ func (c *client) AgentInfo() acp.Implementation {
 	return c.agentInfo
 }
 
+// GetTransportHealth returns the current transport-health snapshot.
+func (c *client) GetTransportHealth() TransportHealth {
+	return c.health.get()
+}
+
+// BudgetTracker returns the budget tracker configured via
+// WithMaxBudgetUSD or WithBudgetTracker. Returns nil when unset.
+func (c *client) BudgetTracker() *BudgetTracker {
+	return c.opts.budgetTracker
+}
+
 // AuthMethods returns the authentication methods the agent advertised
 // during Start.
 func (c *client) AuthMethods() []acp.AuthMethod {
@@ -343,14 +439,16 @@ func (c *client) NewSession(ctx context.Context, opts ...Option) (Session, error
 	merged := c.mergeOptions(opts)
 
 	req := acp.NewSessionRequest{
-		Cwd:        cwdOrEmpty(merged),
-		McpServers: merged.mcpServers,
+		Cwd:                   cwdOrEmpty(merged),
+		McpServers:            merged.mcpServers,
+		AdditionalDirectories: c.resolveAdditionalDirs(ctx, merged),
+		Meta:                  sessionNewMeta(merged),
 	}
 
-	resp, err := c.proc.Conn().NewSession(ctx, req)
+	resp, err := c.transport.Conn().NewSession(ctx, req)
 	if err != nil {
 		if retryErr := c.maybeRelaunchLoginAndRetry(ctx, merged, err); retryErr == nil {
-			resp, err = c.proc.Conn().NewSession(ctx, req)
+			resp, err = c.transport.Conn().NewSession(ctx, req)
 		}
 	}
 
@@ -365,6 +463,9 @@ func (c *client) NewSession(ctx context.Context, opts ...Option) (Session, error
 
 		return nil, err
 	}
+
+	c.attachBudgetTracker(s)
+	c.fireHookSessionStart(ctx, s.ID())
 
 	return s, nil
 }
@@ -384,15 +485,17 @@ func (c *client) LoadSession(ctx context.Context, id string, opts ...Option) (Se
 	s := newSession(c, sessionID, nil, nil, nil, nil, merged.updatesBuffer)
 
 	loadReq := acp.LoadSessionRequest{
-		SessionId:  sessionID,
-		Cwd:        cwdOrEmpty(merged),
-		McpServers: merged.mcpServers,
+		SessionId:             sessionID,
+		Cwd:                   cwdOrEmpty(merged),
+		McpServers:            merged.mcpServers,
+		AdditionalDirectories: c.resolveAdditionalDirs(ctx, merged),
+		Meta:                  sessionNewMeta(merged),
 	}
 
-	resp, err := c.proc.Conn().LoadSession(ctx, loadReq)
+	resp, err := c.transport.Conn().LoadSession(ctx, loadReq)
 	if err != nil {
 		if retryErr := c.maybeRelaunchLoginAndRetry(ctx, merged, err); retryErr == nil {
-			resp, err = c.proc.Conn().LoadSession(ctx, loadReq)
+			resp, err = c.transport.Conn().LoadSession(ctx, loadReq)
 		}
 	}
 
@@ -413,6 +516,9 @@ func (c *client) LoadSession(ctx context.Context, id string, opts ...Option) (Se
 		return nil, err
 	}
 
+	c.attachBudgetTracker(s)
+	c.fireHookSessionStart(ctx, s.ID())
+
 	return s, nil
 }
 
@@ -430,7 +536,7 @@ func (c *client) ListSessions(ctx context.Context, cursor string) ([]SessionInfo
 		req.Cursor = &cursor
 	}
 
-	resp, err := c.proc.Conn().ListSessions(ctx, req)
+	resp, err := c.transport.Conn().ListSessions(ctx, req)
 	if err != nil {
 		return nil, "", wrapACPErr(err)
 	}
@@ -477,6 +583,7 @@ func (c *client) mergeOptions(override []Option) *options {
 	merged.mcpServers = append([]acp.McpServer{}, c.opts.mcpServers...)
 	merged.cliFlags = append([]string(nil), c.opts.cliFlags...)
 	merged.sdkTools = append([]Tool(nil), c.opts.sdkTools...)
+	merged.additionalDirectories = append([]string(nil), c.opts.additionalDirectories...)
 
 	if c.opts.env != nil {
 		merged.env = make(map[string]string, len(c.opts.env))
@@ -582,10 +689,43 @@ func (c *client) deregisterSession(id acp.SessionId) {
 // teardownSession is the rollback path for session creation: close the
 // session's updates channel and remove it from routing. Callers invoke
 // this when post-creation work (applySessionConfig) fails and the
-// session must not leak.
+// session must not leak. Fires HookEventSessionEnd for observers.
 func (c *client) teardownSession(s *session) {
 	c.deregisterSession(s.id)
 	s.close()
+	c.fireHookSessionEnd(context.Background(), s.ID())
+}
+
+// attachBudgetTracker subscribes the configured BudgetTracker (if any)
+// to s so UsageUpdate notifications feed its accumulated totals. When
+// WithMaxBudgetUSD was used, the subscription also calls Session.Cancel
+// once the budget is exceeded so the in-flight turn aborts.
+func (c *client) attachBudgetTracker(s *session) {
+	bt := c.opts.budgetTracker
+	if bt == nil {
+		return
+	}
+
+	autoCancel := c.opts.autoCancelOnBudget
+	sessionID := s.ID()
+
+	s.Subscribe(UpdateHandlers{
+		Usage: func(ctx context.Context, upd *acp.SessionUsageUpdate) {
+			bt.ObserveUsage(sessionID)(ctx, upd)
+
+			if !autoCancel {
+				return
+			}
+
+			if bt.CheckBudget() == nil {
+				return
+			}
+
+			if err := s.Cancel(ctx); err != nil {
+				s.logger.Debug("budget-exceeded cancel failed", slog.Any("error", err))
+			}
+		},
+	})
 }
 
 // routeSessionUpdate is wired as the dispatcher's SessionUpdate
@@ -623,17 +763,46 @@ func (c *client) routeSessionUpdate(ctx context.Context, n acp.SessionNotificati
 	return nil
 }
 
-// instrumentedPermission wraps cb with observability. Returns nil when
-// cb is nil so the dispatcher falls through to its default auto-reject
-// path (which picks a "reject" option from the request instead of
-// surfacing a JSON-RPC internal error to the agent).
+// instrumentedPermission wraps cb with observability and hook
+// dispatch. The wrapper always returns a non-nil handlers.PermissionCallback
+// when hooks are configured, so PermissionRequest/PermissionDenied
+// hooks still fire even when the user did not register their own
+// PermissionCallback. When cb is nil and no hooks are active, we
+// return nil so the dispatcher falls through to its default
+// auto-reject path.
 func (c *client) instrumentedPermission(cb PermissionCallback) handlers.PermissionCallback {
-	if cb == nil {
+	if cb == nil && c.hooks == nil {
 		return nil
 	}
 
 	return func(ctx context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
-		resp, err := cb(ctx, req)
+		// Pre-hook: give HookEventPermissionRequest a chance to block.
+		if c.hooks != nil {
+			decision, hookErr := c.hooks.dispatch(ctx, HookEventPermissionRequest, deref(req.ToolCall.Title), HookInput{
+				Event:             HookEventPermissionRequest,
+				SessionID:         string(req.SessionId),
+				PermissionRequest: &req,
+			})
+			if hookErr != nil || !decision.Continue {
+				resp := synthReject(req, decision.Reason)
+
+				c.observer.RecordPermission(ctx, "hook_blocked")
+				c.fireHookPermissionDenied(ctx, &req, &resp)
+
+				return resp, hookErr
+			}
+		}
+
+		var (
+			resp acp.RequestPermissionResponse
+			err  error
+		)
+
+		if cb != nil {
+			resp, err = cb(ctx, req)
+		} else {
+			resp = synthReject(req, "no permission callback configured")
+		}
 
 		outcome := "error"
 
@@ -647,18 +816,145 @@ func (c *client) instrumentedPermission(cb PermissionCallback) handlers.Permissi
 
 		c.observer.RecordPermission(ctx, outcome)
 
+		// Post-hook: fire PermissionDenied when the outcome was a reject.
+		if err == nil && isRejectOutcome(resp) {
+			c.fireHookPermissionDenied(ctx, &req, &resp)
+		}
+
 		return resp, err
 	}
 }
 
-// instrumentedFsWrite wraps cb with observability. Returns nil when cb
-// is nil so the dispatcher's default "write to disk" path runs.
+// fireHookSessionStart runs HookEventSessionStart. Notification-only.
+func (c *client) fireHookSessionStart(ctx context.Context, sessionID string) {
+	if c.hooks == nil {
+		return
+	}
+
+	_, _ = c.hooks.dispatch(ctx, HookEventSessionStart, sessionID, HookInput{
+		Event:     HookEventSessionStart,
+		SessionID: sessionID,
+	})
+}
+
+// fireHookSessionEnd runs HookEventSessionEnd. Notification-only.
+func (c *client) fireHookSessionEnd(ctx context.Context, sessionID string) {
+	if c.hooks == nil {
+		return
+	}
+
+	_, _ = c.hooks.dispatch(ctx, HookEventSessionEnd, sessionID, HookInput{
+		Event:     HookEventSessionEnd,
+		SessionID: sessionID,
+	})
+}
+
+// fireHookPermissionDenied runs HookEventPermissionDenied. This event
+// is notification-only; Continue=false is ignored.
+func (c *client) fireHookPermissionDenied(ctx context.Context, req *acp.RequestPermissionRequest, resp *acp.RequestPermissionResponse) {
+	if c.hooks == nil {
+		return
+	}
+
+	_, _ = c.hooks.dispatch(ctx, HookEventPermissionDenied, deref(req.ToolCall.Title), HookInput{
+		Event:              HookEventPermissionDenied,
+		SessionID:          string(req.SessionId),
+		PermissionRequest:  req,
+		PermissionResponse: resp,
+	})
+}
+
+// synthReject produces a RequestPermissionResponse rejecting the
+// request. Picks a reject_once option when present, reject_always as
+// a fallback, and finally emits a Cancelled outcome when the request
+// carried no reject option at all.
+func synthReject(req acp.RequestPermissionRequest, _ string) acp.RequestPermissionResponse {
+	for _, opt := range req.Options {
+		if opt.Kind == acp.PermissionOptionKindRejectOnce {
+			return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{
+				Selected: &acp.RequestPermissionOutcomeSelected{OptionId: opt.OptionId},
+			}}
+		}
+	}
+
+	for _, opt := range req.Options {
+		if opt.Kind == acp.PermissionOptionKindRejectAlways {
+			return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{
+				Selected: &acp.RequestPermissionOutcomeSelected{OptionId: opt.OptionId},
+			}}
+		}
+	}
+
+	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{
+		Cancelled: &acp.RequestPermissionOutcomeCancelled{},
+	}}
+}
+
+// isRejectOutcome reports whether resp represents a denial (either a
+// reject_* option id or a cancelled outcome).
+func isRejectOutcome(resp acp.RequestPermissionResponse) bool {
+	switch {
+	case resp.Outcome.Cancelled != nil:
+		return true
+	case resp.Outcome.Selected != nil:
+		id := string(resp.Outcome.Selected.OptionId)
+
+		return containsAny(id, "reject", "deny")
+	}
+
+	return false
+}
+
+// instrumentedFsWrite wraps cb with observability + hook dispatch.
+// The wrapper returns a non-nil callback when hooks are registered,
+// so HookEventFileChanged still fires even when the user did not
+// install their own FsWriteCallback — the default behaviour there is
+// to write the file to disk.
 func (c *client) instrumentedFsWrite(cb FsWriteCallback) handlers.FsWriteCallback {
-	if cb == nil {
+	if cb == nil && c.hooks == nil {
 		return nil
 	}
 
 	return func(ctx context.Context, req acp.WriteTextFileRequest) error {
+		if c.hooks != nil {
+			decision, hookErr := c.hooks.dispatch(ctx, HookEventFileChanged, req.Path, HookInput{
+				Event:     HookEventFileChanged,
+				SessionID: string(req.SessionId),
+				FileWrite: &req,
+			})
+			if hookErr != nil {
+				c.observer.RecordFsDelegation(ctx, "write", "hook_error")
+
+				return hookErr
+			}
+
+			if !decision.Continue {
+				c.observer.RecordFsDelegation(ctx, "write", "hook_blocked")
+
+				reason := decision.Reason
+				if reason == "" {
+					reason = "hook blocked write"
+				}
+
+				return errors.New(reason)
+			}
+		}
+
+		if cb == nil {
+			// Hooks configured but no user callback: replicate the
+			// dispatcher's default "write to disk" behaviour so the
+			// hook event still fires without changing the wire outcome.
+			if err := defaultFsWrite(req); err != nil {
+				c.observer.RecordFsDelegation(ctx, "write", "error")
+
+				return err
+			}
+
+			c.observer.RecordFsDelegation(ctx, "write", "handled")
+
+			return nil
+		}
+
 		err := cb(ctx, req)
 		if err != nil {
 			c.observer.RecordFsDelegation(ctx, "write", "error")
@@ -670,6 +966,28 @@ func (c *client) instrumentedFsWrite(cb FsWriteCallback) handlers.FsWriteCallbac
 
 		return nil
 	}
+}
+
+// defaultFsWrite mirrors the handlers package's default fs/write
+// behaviour for the hook-fallthrough path. Kept in sync with
+// internal/handlers/dispatcher.go.
+func defaultFsWrite(req acp.WriteTextFileRequest) error {
+	if !filepath.IsAbs(req.Path) {
+		return fmt.Errorf("fs/write_text_file: path must be absolute: %q", req.Path)
+	}
+
+	dir := filepath.Dir(req.Path)
+	if dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("fs/write_text_file mkdir: %w", err)
+		}
+	}
+
+	if err := os.WriteFile(req.Path, []byte(req.Content), 0o644); err != nil { //nolint:gosec // intentional: agent-requested write
+		return fmt.Errorf("fs/write_text_file: %w", err)
+	}
+
+	return nil
 }
 
 var (
@@ -774,10 +1092,76 @@ func cwdOrEmpty(o *options) string {
 	return o.cwd
 }
 
+// resolveAdditionalDirs returns the additionalDirectories slice to send
+// with session/new, session/load, session/fork, session/resume. When
+// the agent did not advertise SessionCapabilities.AdditionalDirectories
+// during initialize, the values are dropped and a warning is logged so
+// the caller notices the option was silently ignored.
+func (c *client) resolveAdditionalDirs(ctx context.Context, o *options) []string {
+	if len(o.additionalDirectories) == 0 {
+		return nil
+	}
+
+	if c.agentCaps.SessionCapabilities.AdditionalDirectories == nil {
+		c.opts.logger.WarnContext(ctx, "WithAddDirs ignored: agent does not advertise additionalDirectories capability",
+			slog.Int("count", len(o.additionalDirectories)),
+		)
+
+		return nil
+	}
+
+	out := make([]string, len(o.additionalDirectories))
+	copy(out, o.additionalDirectories)
+
+	return out
+}
+
+// sessionNewMeta builds the _meta block sent with session/new. Only
+// populated for options that should surface to the agent, currently
+// WithOutputSchema.
+func sessionNewMeta(o *options) map[string]any {
+	if o.outputSchema == nil {
+		return nil
+	}
+
+	return map[string]any{"structuredOutputSchema": o.outputSchema}
+}
+
+// subprocessEnv builds the environment overlay for the opencode
+// subprocess. WithOpencodeHome (if set) is exported as XDG_DATA_HOME
+// so opencode stores sessions and credentials under the caller-
+// specified path.
+func subprocessEnv(o *options) map[string]string {
+	if o.opencodeHome == "" {
+		return o.env
+	}
+
+	out := make(map[string]string, len(o.env)+1)
+	maps.Copy(out, o.env)
+
+	// WithEnv takes precedence; only set XDG_DATA_HOME when the caller
+	// hasn't explicitly configured it themselves.
+	if _, ok := out["XDG_DATA_HOME"]; !ok {
+		out["XDG_DATA_HOME"] = o.opencodeHome
+	}
+
+	return out
+}
+
 func acpStringPtr(s string) *string {
 	if s == "" {
 		return nil
 	}
 
 	return &s
+}
+
+// deref returns *p or "" when p is nil. Hooks that match against
+// optional *string fields go through this to avoid nil panics.
+func deref(p *string) string {
+	if p == nil {
+		return ""
+	}
+
+	return *p
 }

@@ -13,6 +13,14 @@ for the protocol layer. This package adds:
 - typed wrappers for opencode's unstable session RPCs
   (`ForkSession`, `ResumeSession`, `UnstableSetModel`) and the
   `_meta.opencode.variant` model-variant channel
+- generic session config switching via
+  `Session.SetConfigOption(ctx, configID, value)` /
+  `SetConfigOptionBool` — the canonical path behind `SetModel` /
+  `SetMode`
+- `Client.LoadSessionHistory` — rehydrate a session and capture
+  opencode's replayed `session/update` notifications into a typed
+  `SessionHistory` (raw notifications, coalesced messages, last
+  usage)
 - typed `session/update` subscribers (`Session.Subscribe` +
   `UpdateHandlers`) for AgentMessage, Plan, ToolCall, Mode, Usage, etc.
 - turn-complete and updates-dropped hooks
@@ -21,6 +29,16 @@ for the protocol layer. This package adds:
 - a raw extension-method escape hatch (`Client.CallExtension`) for
   ACP `_`-prefixed methods the SDK doesn't wrap yet
 - `session/request_permission` and `fs/write_text_file` callbacks
+- observational cost + budget: `CostTracker`, `BudgetTracker`,
+  `WithMaxBudgetUSD` (auto-cancels the in-flight turn when the cap
+  is crossed), plus `ErrBudgetExceeded`
+- typed error classification: `ClassifyError` returns an
+  `ErrorClassification` with coarse `Class` plus a finer
+  `SubClass` (prompt-too-long, rate-limit-tokens vs requests,
+  invalid-schema, invalid-model, subprocess-died) so resilience
+  wrappers can pick targeted strategies
+- file-backed content helpers: `PathInput` (auto-detects image / audio /
+  text / blob), `PDFFileInput`, `AudioFileInput`, `ImageFileInput`
 - **in-process Go tools** via a loopback HTTP MCP bridge
   (`WithSDKTools`) — no separate MCP server to run
 - opencode's `terminal-auth` auth-flow hint extraction
@@ -49,7 +67,7 @@ go get github.com/ethpandaops/opencode-agent-sdk-go
 
 ## Quick start
 
-One-shot via `Query`:
+One-shot via `Query` (plain text):
 
 ```go
 res, err := opencodesdk.Query(ctx, "Say hello in three words.", opencodesdk.WithCwd(cwd))
@@ -57,6 +75,41 @@ if err != nil {
     panic(err)
 }
 fmt.Println(res.AssistantText)
+```
+
+Multimodal via `QueryContent`:
+
+```go
+img, _ := opencodesdk.ImageFileInput("./screenshot.png")
+
+res, err := opencodesdk.QueryContent(ctx,
+    opencodesdk.Blocks(
+        opencodesdk.TextBlock("Describe the attached image in one sentence."),
+        img,
+    ),
+    opencodesdk.WithCwd(cwd),
+)
+```
+
+Dynamic prompt streams via `QueryStreamContent` + an iterator helper:
+
+```go
+ch := make(chan []acp.ContentBlock)
+go func() {
+    defer close(ch)
+    ch <- opencodesdk.Text("Reply with just: one")
+    ch <- opencodesdk.Text("Reply with just: two")
+}()
+
+for res, err := range opencodesdk.QueryStreamContent(ctx,
+    opencodesdk.PromptsFromChannel(ch),
+    opencodesdk.WithCwd(cwd),
+) {
+    if err != nil {
+        break
+    }
+    fmt.Println(res.AssistantText)
+}
 ```
 
 Long-lived client with streaming:
@@ -162,11 +215,92 @@ program versus shelling out.
 | `WithCanUseTool(cb)` | permission-prompt callback |
 | `WithOnFsWrite(cb)` | intercept `fs/write_text_file` |
 | `WithStrictCwdBoundary(bool)` | reject writes outside cwd |
+| `WithAddDirs(dirs...)` | extra workspace roots (ACP unstable, capability-gated) |
+| `WithPure()` | sugar for `--pure` — disables external opencode plugins |
+| `WithTransport(factory)` | custom transport (test doubles / embedded setups) |
 | `WithUpdatesBuffer(n)` | per-session update channel size |
 | `WithTerminalAuthCapability(bool)` | opt into opencode's `terminal-auth` launch hints |
 | `WithAutoLaunchLogin(bool)` | auto-spawn `opencode auth login` on `authRequired` |
 | `WithMeterProvider(mp)` | OTel MeterProvider |
 | `WithTracerProvider(tp)` | OTel TracerProvider |
+
+## Utilities
+
+A handful of utilities for common SDK workflows, mirrored against the
+claude and codex sister SDKs:
+
+- **MCP tool-author helpers** — `TextResult`, `ErrorResult`,
+  `ImageResult`, `ParseArguments`, `SimpleSchema` build tool results
+  and input schemas without hand-rolled `ToolResult` literals.
+- **Typed errors** — `*CLINotFoundError` and `*ProcessError` carry
+  structured diagnostic context (`SearchedPaths`, `ExitCode`,
+  `Stderr`) alongside the `ErrCLINotFound` / `ErrClientClosed`
+  sentinels.
+- **Transport health** — `Client.GetTransportHealth()` returns a
+  `TransportHealth` snapshot with degradation flag, failure counts,
+  and last-error details.
+- **Session-cost tracker** — `NewCostTracker()` aggregates per-session
+  cost and token usage from `UsageUpdate` notifications.
+  `LoadSessionCost` / `SaveSessionCost` persist snapshots to
+  `$XDG_DATA_HOME/opencode/sdk/session-costs/<id>.json`.
+- **Structured output** — `DecodeStructuredOutput[T](result)` pulls a
+  typed T from `QueryResult` (session-update meta first, JSON-fenced
+  assistant text second). `WithOutputSchema(map[string]any)` advises
+  the agent via `session/new._meta["structuredOutputSchema"]`.
+- **Retry / classification** — `ClassifyError(err)` maps any SDK
+  error to an `ErrorClass` + `RecoveryAction`. `EvaluateRetry` and
+  `ResilientQuery` apply exponential back-off with jitter on
+  retryable failures (rate limit, overload, transient connection).
+- **Model catalogue** — `ListModels(ctx, opts...)` returns every
+  model opencode advertises for the configured cwd without writing
+  a full session loop.
+- **Data-dir override** — `WithOpencodeHome(path)` sets
+  `XDG_DATA_HOME` for the subprocess and for cost-snapshot
+  persistence — convenient for tests and multi-env setups.
+- **Hooks** — `WithHooks(...)` registers typed callbacks for 11
+  lifecycle events (PreToolUse, PostToolUse, UserPromptSubmit, Stop,
+  SessionStart/End, PermissionRequest/Denied, FileChanged, …).
+  `HookOutput{Continue:false}` blocks the triggering action for the
+  events that support blocking (UserPromptSubmit, PermissionRequest,
+  FileChanged).
+- **Tool-side elicitation** — `Elicit(ctx, params)` callable from
+  within a `Tool.Execute` sends an MCP elicitation through the
+  loopback bridge back to opencode, which routes it to the user.
+  Returns the user's answer or `ErrElicitationUnavailable` when
+  there's no bound session.
+
+See [`doc.go`](./doc.go) for full package-level documentation.
+
+### Observability
+
+New metrics emitted alongside the existing `opencodesdk.*` surface:
+
+- `opencodesdk.retry.attempt` (`class`, `outcome`) — ResilientQuery
+  retry decisions.
+- `opencodesdk.structured_output.decode` (`source`, `outcome`) —
+  DecodeStructuredOutput invocations.
+- `opencodesdk.transport.failure` (`kind`) — transport-layer
+  failures observed by the Client.
+
+#### Prometheus
+
+Two paths:
+
+```go
+// 1. WithPrometheusRegisterer — SDK wires an OTel Prometheus
+//    exporter internally.
+reg := prometheus.NewRegistry()
+_, _ = opencodesdk.Query(ctx, prompt,
+    opencodesdk.WithPrometheusRegisterer(reg),
+)
+
+// 2. WithMeterProvider — bring your own OTel MeterProvider. Useful
+//    when you're already running an OTel pipeline and want SDK
+//    metrics to land alongside everything else.
+opencodesdk.WithMeterProvider(myMeterProvider)
+```
+
+See `examples/prometheus_metrics` for the full scrape-server setup.
 
 ## Examples
 
@@ -179,6 +313,13 @@ See [`examples/`](./examples/) for seven working programs:
 - `permission_callback` — interactive permission UX
 - `fs_intercept` — capture writes in memory instead of on disk
 - `plan_mode` — `WithAgent("plan")` to trigger permission prompts out of the box
+- `cost_tracker` — aggregate per-session cost and persist snapshots
+- `resilient_query` — ResilientQuery with backoff + error classification
+- `hooks` — typed lifecycle hooks via `WithHooks`
+- `elicitation` — a tool that asks the user to confirm via MCP
+  elicitation through the loopback bridge
+- `prometheus_metrics` — expose SDK metrics via `/metrics` using
+  `WithPrometheusRegisterer`
 
 ## Architecture
 

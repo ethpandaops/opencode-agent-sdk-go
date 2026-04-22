@@ -10,9 +10,10 @@ import (
 // ForkSession creates a new session that inherits the parent's state
 // up to the current turn. The returned Session has a new SessionId.
 //
-// This wraps the opencode-specific `unstable_forkSession` RPC. The
-// protocol is marked unstable in ACP; opencode 1.14.20 is the
-// reference implementation the SDK is pinned against.
+// This wraps ACP's unstable `session/fork` RPC (exposed by the Go
+// protocol layer as UnstableForkSession). The protocol is marked
+// unstable in ACP; opencode 1.14.20 is the reference implementation
+// the SDK is pinned against.
 func (c *client) ForkSession(ctx context.Context, parentID string, opts ...Option) (Session, error) {
 	if err := c.ensureStarted(); err != nil {
 		return nil, err
@@ -21,12 +22,13 @@ func (c *client) ForkSession(ctx context.Context, parentID string, opts ...Optio
 	merged := c.mergeOptions(opts)
 
 	req := acp.UnstableForkSessionRequest{
-		SessionId:  acp.SessionId(parentID),
-		Cwd:        cwdOrEmpty(merged),
-		McpServers: merged.mcpServers,
+		SessionId:             acp.SessionId(parentID),
+		Cwd:                   cwdOrEmpty(merged),
+		McpServers:            merged.mcpServers,
+		AdditionalDirectories: c.resolveAdditionalDirs(ctx, merged),
 	}
 
-	resp, err := c.proc.Conn().UnstableForkSession(ctx, req)
+	resp, err := c.transport.Conn().UnstableForkSession(ctx, req)
 	if err != nil {
 		return nil, wrapACPErr(err)
 	}
@@ -39,6 +41,9 @@ func (c *client) ForkSession(ctx context.Context, parentID string, opts ...Optio
 		return nil, err
 	}
 
+	c.attachBudgetTracker(s)
+	c.fireHookSessionStart(ctx, s.ID())
+
 	return s, nil
 }
 
@@ -46,7 +51,8 @@ func (c *client) ForkSession(ctx context.Context, parentID string, opts ...Optio
 // history via session/update notifications. Prefer LoadSession if you
 // want the replay to feed your UI.
 //
-// This wraps opencode's `unstable_resumeSession` RPC.
+// This wraps ACP's unstable `session/resume` RPC (exposed by the Go
+// protocol layer as UnstableResumeSession).
 func (c *client) ResumeSession(ctx context.Context, sessionID string, opts ...Option) (Session, error) {
 	if err := c.ensureStarted(); err != nil {
 		return nil, err
@@ -59,12 +65,13 @@ func (c *client) ResumeSession(ctx context.Context, sessionID string, opts ...Op
 	s := newSession(c, sid, nil, nil, nil, nil, merged.updatesBuffer)
 
 	req := acp.UnstableResumeSessionRequest{
-		SessionId:  sid,
-		Cwd:        cwdOrEmpty(merged),
-		McpServers: merged.mcpServers,
+		SessionId:             sid,
+		Cwd:                   cwdOrEmpty(merged),
+		McpServers:            merged.mcpServers,
+		AdditionalDirectories: c.resolveAdditionalDirs(ctx, merged),
 	}
 
-	resp, err := c.proc.Conn().UnstableResumeSession(ctx, req)
+	resp, err := c.transport.Conn().UnstableResumeSession(ctx, req)
 	if err != nil {
 		c.teardownSession(s)
 
@@ -79,6 +86,9 @@ func (c *client) ResumeSession(ctx context.Context, sessionID string, opts ...Op
 
 		return nil, err
 	}
+
+	c.attachBudgetTracker(s)
+	c.fireHookSessionStart(ctx, s.ID())
 
 	return s, nil
 }
@@ -130,16 +140,17 @@ func OpencodeVariant(meta map[string]any) (*VariantInfo, bool) {
 	return info, true
 }
 
-// UnstableSetModel issues opencode's unstable_setSessionModel RPC.
-// Prefer Session.SetModel (which goes through the stable
-// session/set_config_option path) unless you specifically need the
+// UnstableSetModel issues ACP's unstable `session/set_model` RPC
+// (UnstableSetSessionModel at the Go protocol layer). Prefer
+// Session.SetModel — which goes through the stable
+// session/set_config_option path — unless you specifically need the
 // legacy path that returns only _meta.opencode.variant state.
 func (c *client) UnstableSetModel(ctx context.Context, sessionID, modelID string) error {
 	if err := c.ensureStarted(); err != nil {
 		return err
 	}
 
-	_, err := c.proc.Conn().UnstableSetSessionModel(ctx, acp.UnstableSetSessionModelRequest{
+	_, err := c.transport.Conn().UnstableSetSessionModel(ctx, acp.UnstableSetSessionModelRequest{
 		SessionId: acp.SessionId(sessionID),
 		ModelId:   acp.UnstableModelId(modelID),
 	})

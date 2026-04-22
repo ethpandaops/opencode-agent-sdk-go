@@ -23,7 +23,49 @@ import (
 // HandlerFunc is the tool-invocation handler the bridge invokes when
 // opencode calls one of the registered tools. It receives the raw
 // arguments as a map and returns a structured ToolOutput or an error.
+//
+// The ctx passed to the handler carries a ToolSession under
+// sessionContextKey, accessible via SessionFromContext. Tools that
+// want to send an MCP elicitation (server → client prompt) back to
+// opencode should pull the session from ctx and call Elicit.
 type HandlerFunc func(ctx context.Context, input map[string]any) (*ToolOutput, error)
+
+// ToolSession is the minimal surface a bridge-served tool needs for
+// server-initiated interactions (currently: elicitation). It mirrors
+// a subset of *mcp.ServerSession so the public opencodesdk package
+// can expose a stable API without leaking the MCP-SDK types.
+type ToolSession interface {
+	// Elicit sends an MCP elicitation request to the connected
+	// client (opencode). Returns the client's response (or an error
+	// if the client does not support elicitation).
+	Elicit(ctx context.Context, params *mcp.ElicitParams) (*mcp.ElicitResult, error)
+}
+
+// sessionKey is the ctx key under which we stash the ToolSession for
+// the duration of a handler invocation.
+type sessionKey struct{}
+
+// SessionFromContext returns the ToolSession bound to ctx by the
+// bridge's tool dispatch, or nil when ctx does not carry one.
+func SessionFromContext(ctx context.Context) ToolSession {
+	v, _ := ctx.Value(sessionKey{}).(ToolSession)
+
+	return v
+}
+
+// withSession returns a derived ctx carrying s. Used by the bridge's
+// tool dispatch so handlers can reach the owning ServerSession.
+func withSession(ctx context.Context, s ToolSession) context.Context {
+	return context.WithValue(ctx, sessionKey{}, s)
+}
+
+// ContextWithSessionForTest is a test-only helper that installs a
+// ToolSession into ctx. Exposed so opencodesdk's Elicit test can
+// fake out the session without reaching into unexported symbols.
+// Not intended for production callers.
+func ContextWithSessionForTest(ctx context.Context, s ToolSession) context.Context {
+	return withSession(ctx, s)
+}
 
 // InvocationRecorder receives a single observation for each tool call
 // routed through the bridge. status is one of "ok", "error",
@@ -207,6 +249,13 @@ func addTool(server *mcp.Server, def ToolDef, recorder InvocationRecorder) {
 				Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
 				IsError: true,
 			}, nil
+		}
+
+		// Attach the owning ServerSession so handlers can send
+		// elicitations (and future server-initiated calls) back to
+		// opencode via SessionFromContext(ctx).
+		if req.Session != nil {
+			ctx = withSession(ctx, req.Session)
 		}
 
 		out, err := def.Handler(ctx, input)

@@ -38,11 +38,28 @@ type Session interface {
 	// closed when the owning Client is closed.
 	Updates() <-chan acp.SessionNotification
 
-	// SetModel changes the model used for subsequent prompts.
+	// SetModel changes the model used for subsequent prompts. Sugar for
+	// SetConfigOption(ctx, "model", modelID).
 	SetModel(ctx context.Context, modelID string) error
 
 	// SetMode changes the agent ("mode") used for subsequent prompts.
+	// Sugar for SetConfigOption(ctx, "mode", modeID).
 	SetMode(ctx context.Context, modeID string) error
+
+	// SetConfigOption routes a session/set_config_option RPC with a
+	// string value. configID must match one of the option ids reported in
+	// InitialConfigOptions (e.g. "model", "mode", "provider"). The value
+	// must be one of the valid value ids for that option.
+	//
+	// Prefer SetModel / SetMode for the two common cases.
+	SetConfigOption(ctx context.Context, configID, value string) error
+
+	// SetConfigOptionBool routes a session/set_config_option RPC with a
+	// boolean value. Applicable to opencode config options whose
+	// SessionConfigOption variant is a boolean (opencode currently does
+	// not expose any via ACP; included for forward compatibility with
+	// agents that do).
+	SetConfigOptionBool(ctx context.Context, configID string, value bool) error
 
 	// InitialModels returns the SessionModelState reported by opencode
 	// at session creation (or the last loadSession/resume). May be nil

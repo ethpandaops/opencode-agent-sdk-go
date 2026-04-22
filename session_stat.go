@@ -65,7 +65,7 @@ func (c *client) CallExtension(ctx context.Context, method string, params any) (
 		return nil, fmt.Errorf("%w: %q", ErrExtensionMethodRequired, method)
 	}
 
-	raw, err := c.proc.Conn().CallExtension(ctx, method, params)
+	raw, err := c.transport.Conn().CallExtension(ctx, method, params)
 	if err != nil {
 		return nil, wrapACPErr(err)
 	}

@@ -35,6 +35,9 @@ type Observer struct {
 	costUSD            metric.Float64Counter
 	initializeDuration metric.Float64Histogram
 	cliSpawn           metric.Int64Counter
+	retryAttempt       metric.Int64Counter
+	structuredDecode   metric.Int64Counter
+	transportFailure   metric.Int64Counter
 }
 
 // NewObserver constructs an Observer. Either provider may be nil; in
@@ -118,6 +121,21 @@ func NewObserver(mp metric.MeterProvider, tp trace.TracerProvider) *Observer {
 		metric.WithDescription("opencode CLI subprocess spawn events, by outcome"),
 	)
 
+	retryAttempt, _ := meter.Int64Counter(
+		Namespace+".retry.attempt",
+		metric.WithDescription("ResilientQuery retry attempts, by error class + outcome"),
+	)
+
+	structuredDecode, _ := meter.Int64Counter(
+		Namespace+".structured_output.decode",
+		metric.WithDescription("DecodeStructuredOutput invocations, by source + outcome"),
+	)
+
+	transportFailure, _ := meter.Int64Counter(
+		Namespace+".transport.failure",
+		metric.WithDescription("Transport-layer failures observed by the Client, by kind"),
+	)
+
 	return &Observer{
 		tracer:             tracer,
 		promptDuration:     promptDuration,
@@ -132,7 +150,40 @@ func NewObserver(mp metric.MeterProvider, tp trace.TracerProvider) *Observer {
 		costUSD:            costUSD,
 		initializeDuration: initializeDuration,
 		cliSpawn:           cliSpawn,
+		retryAttempt:       retryAttempt,
+		structuredDecode:   structuredDecode,
+		transportFailure:   transportFailure,
 	}
+}
+
+// RecordRetryAttempt records one ResilientQuery retry decision.
+// outcome is "retry" when the loop is about to sleep, "exhausted"
+// when MaxRetries is reached, or "fatal" when the error is not
+// retryable.
+func (o *Observer) RecordRetryAttempt(ctx context.Context, class, outcome string) {
+	o.retryAttempt.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("class", class),
+		attribute.String("outcome", outcome),
+	))
+}
+
+// RecordStructuredDecode records one DecodeStructuredOutput call.
+// source is "notifications" when the payload came from session-update
+// meta, "text" when parsed from the assistant text, or "prompt_meta"
+// when read from PromptResult.Meta. outcome is "ok" or "missing".
+func (o *Observer) RecordStructuredDecode(ctx context.Context, source, outcome string) {
+	o.structuredDecode.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("source", source),
+		attribute.String("outcome", outcome),
+	))
+}
+
+// RecordTransportFailure records one transport-layer failure
+// observation. kind is "send", "read", or "subprocess".
+func (o *Observer) RecordTransportFailure(ctx context.Context, kind string) {
+	o.transportFailure.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("kind", kind),
+	))
 }
 
 // Tracer returns the SDK's OTel tracer.

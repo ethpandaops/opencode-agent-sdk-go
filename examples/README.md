@@ -25,7 +25,11 @@ run `opencode auth login` out of band.
 | `error_handling` | Trip every SDK sentinel error on purpose (`ErrCLINotFound`, `ErrClientClosed`, `ErrClientNotStarted`, …) and show how to match them. |
 | `stderr_callback` | Capture opencode's stderr line-by-line via `WithStderr`. |
 | `custom_logger` | Route `opencodesdk`'s internal logs through a custom `slog.Handler`. |
-| `multimodal_input` | Send a mixed text + inline-image prompt using `acp.TextBlock` + `acp.ImageBlock`. |
+| `multimodal_input` | Send a mixed text + image prompt via `QueryContent` + `ImageFileInput` + `Blocks`. |
+| `query_stream_iter` | Drive `QueryStreamContent` with `PromptsFromChannel` to feed prompts dynamically. |
+| `add_dirs` | Forward ACP's unstable `additionalDirectories` via `WithAddDirs`, with capability-probe fallback. |
+| `custom_transport` | Inject a test-double `Transport` via `WithTransport`, bypassing the `opencode acp` subprocess entirely (useful for tests / embedded setups). |
+| `resilient_query` | Wrap `Query` with retry-on-transient via `ResilientQuery` + `RetryPolicy`. |
 | `pipeline` | Chain generate → evaluate → gate (Go) → refine on one session, using Go-side logic to gate on an LLM-scored threshold. |
 | `typed_subscribers` | Register typed per-variant callbacks via `Session.Subscribe` + `WithOnTurnComplete` instead of demuxing raw `Session.Updates()`. |
 | `iter_sessions` | Enumerate every session in the configured cwd via `Client.IterSessions`, which paginates through `session/list` transparently. |
@@ -34,6 +38,10 @@ run `opencode auth login` out of band.
 | `session_mutations` | `Session.SetModel` and `Session.SetMode` for intra-session config changes, with typed subscribers watching the resulting `SessionConfigOptionUpdate` / `CurrentModeUpdate` notifications. |
 | `model_variant` | opencode-specific reasoning-effort variants: `Session.CurrentVariant`, `opencodesdk.OpencodeVariant`, and `Client.UnstableSetModel` for switching between e.g. `default` / `high` / `max`. |
 | `prometheus_metrics` | Wire `WithMeterProvider` to a Prometheus registry and serve `/metrics` on `localhost:9090`. Lives in its own Go sub-module so Prometheus deps don't leak into the root module. |
+| `cost_tracker` | Feed a `CostTracker` from `UsageUpdate` notifications and persist the snapshot under `$XDG_DATA_HOME/opencode/sdk/session-costs/`. |
+| `max_budget_usd` | Cap total USD spend with `WithMaxBudgetUSD`; the SDK auto-subscribes each session and calls `Session.Cancel` when the budget trips. `Client.BudgetTracker()` exposes the running snapshot. |
+| `load_history` | Rehydrate a session with `Client.LoadSessionHistory` and inspect the replayed messages / raw notifications / final usage as a typed `SessionHistory`. |
+| `set_config_option` | List `Session.InitialConfigOptions()` and drive `Session.SetConfigOption` / `SetConfigOptionBool` for arbitrary config ids beyond `model` / `mode`. |
 
 For one-shot interactions, [`opencodesdk.Query`](../query.go) and
 [`opencodesdk.WithClient`](../with_client.go) wrap the lifecycle shown

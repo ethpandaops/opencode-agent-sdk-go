@@ -53,6 +53,11 @@ var (
 	// when the supplied method name does not begin with an underscore.
 	// The ACP spec reserves `_`-prefixed methods for extensions.
 	ErrExtensionMethodRequired = errors.New("extension method names must begin with \"_\"")
+
+	// ErrStructuredOutputMissing is returned by DecodeStructuredOutput
+	// when neither the PromptResult.Meta block nor the QueryResult
+	// AssistantText carries a decodable payload for the requested type.
+	ErrStructuredOutputMissing = errors.New("opencodesdk: structured output missing")
 )
 
 // RequestError is the typed JSON-RPC error surface exposed to callers. It
@@ -66,6 +71,75 @@ type RequestError struct {
 
 func (e *RequestError) Error() string {
 	return fmt.Sprintf("acp error %d: %s", e.Code, e.Message)
+}
+
+// CLINotFoundError is the typed companion to ErrCLINotFound. It records
+// the paths the SDK searched while trying to locate the opencode
+// binary so callers can produce an actionable diagnostic.
+//
+// The error chain always includes ErrCLINotFound so `errors.Is(err,
+// ErrCLINotFound)` works on both the typed and sentinel forms.
+type CLINotFoundError struct {
+	// SearchedPaths lists the candidate paths the SDK evaluated, in the
+	// order they were tried. At minimum this includes "$PATH" when no
+	// explicit WithCLIPath was supplied.
+	SearchedPaths []string
+	// Err is the underlying cause, if any (e.g. the exec.LookPath error).
+	Err error
+}
+
+func (e *CLINotFoundError) Error() string {
+	if len(e.SearchedPaths) == 0 {
+		if e.Err != nil {
+			return fmt.Sprintf("opencode CLI not found: %v", e.Err)
+		}
+
+		return "opencode CLI not found"
+	}
+
+	return fmt.Sprintf("opencode CLI not found in: %v", e.SearchedPaths)
+}
+
+func (e *CLINotFoundError) Unwrap() error {
+	return e.Err
+}
+
+// Is reports whether target is ErrCLINotFound. This lets callers write
+// `errors.Is(err, ErrCLINotFound)` when they only care about the kind.
+func (e *CLINotFoundError) Is(target error) bool {
+	return target == ErrCLINotFound //nolint:errorlint // intentional sentinel identity check
+}
+
+// ProcessError is the typed companion surfaced when the opencode
+// subprocess terminates with a non-zero exit status. The SDK
+// constructs this in the watchSubprocess path for callers that want
+// to inspect exit code / stderr rather than match on a sentinel.
+type ProcessError struct {
+	// ExitCode is the subprocess exit code. -1 when unavailable (e.g.
+	// signal-terminated before a status was recorded).
+	ExitCode int
+	// Stderr, when non-empty, is the final tail of the subprocess's
+	// stderr as captured by the SDK's stderr forwarder.
+	Stderr string
+	// Err is the underlying os/exec error (typically *exec.ExitError).
+	Err error
+}
+
+func (e *ProcessError) Error() string {
+	switch {
+	case e.Err != nil && e.Stderr != "":
+		return fmt.Sprintf("opencode acp process failed (exit %d): %v: %s", e.ExitCode, e.Err, e.Stderr)
+	case e.Err != nil:
+		return fmt.Sprintf("opencode acp process failed (exit %d): %v", e.ExitCode, e.Err)
+	case e.Stderr != "":
+		return fmt.Sprintf("opencode acp process failed (exit %d): %s", e.ExitCode, e.Stderr)
+	default:
+		return fmt.Sprintf("opencode acp process failed (exit %d)", e.ExitCode)
+	}
+}
+
+func (e *ProcessError) Unwrap() error {
+	return e.Err
 }
 
 // wrapACPErr converts a *acp.RequestError to opencodesdk-native error

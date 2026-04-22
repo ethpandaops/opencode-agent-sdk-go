@@ -1,19 +1,21 @@
-// Demonstrates sending a multimodal prompt to opencode via ACP
-// content blocks. The example builds a prompt with mixed text + a
-// tiny inline base64-encoded PNG image, then asks the agent to
-// describe what it sees.
+// Demonstrates multimodal prompt input via the opencodesdk.QueryContent
+// one-shot helper.
 //
-// ACP content-block constructors (re-exported from coder/acp-go-sdk):
+// This example shows three entry points:
 //
-//   - acp.TextBlock(str)
-//   - acp.ImageBlock(base64Data, mimeType)
-//   - acp.AudioBlock(base64Data, mimeType)
-//   - acp.ResourceLinkBlock(name, uri)
-//   - acp.ResourceBlock(embedded)
+//  1. opencodesdk.QueryContent     — one-shot text + image prompt
+//  2. opencodesdk.ImageFileInput   — load an image from disk
+//  3. opencodesdk.Text / Blocks     — ergonomic block constructors
+//
+// The legacy string-only opencodesdk.Query still works for plain text —
+// QueryContent is only needed when you want to attach images, embedded
+// resources, or other non-text content blocks.
 //
 // Image support requires the agent to advertise the "image" prompt
-// capability; opencode does when attached to a multimodal-capable
-// model.
+// capability during ACP initialize; opencode advertises it when
+// attached to a multimodal-capable model. If the capability isn't
+// advertised, the SDK rejects image blocks with ErrCapabilityUnavailable
+// before the prompt reaches opencode.
 //
 //	go run ./examples/multimodal_input
 package main
@@ -24,9 +26,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
 	opencodesdk "github.com/ethpandaops/opencode-agent-sdk-go"
 )
 
@@ -39,57 +41,54 @@ func main() {
 
 	cwd, _ := os.Getwd()
 
-	// Sanity-check the literal is decodable; prevents silent corruption
-	// if someone edits it inline.
-	if _, err := base64.StdEncoding.DecodeString(redSquarePNG); err != nil {
-		fmt.Fprintf(os.Stderr, "image literal is not valid base64: %v\n", err)
-		os.Exit(1)
+	// Write the inline PNG to a temp file so we can exercise
+	// ImageFileInput alongside the inline ImageBlock path.
+	path := filepath.Join(os.TempDir(), "opencodesdk-example-red.png")
+
+	data, err := base64.StdEncoding.DecodeString(redSquarePNG)
+	if err != nil {
+		exitf("decode test png: %v", err)
+	}
+
+	if werr := os.WriteFile(path, data, 0o600); werr != nil {
+		exitf("write test png: %v", werr)
+	}
+
+	defer os.Remove(path)
+
+	img, err := opencodesdk.ImageFileInput(path)
+	if err != nil {
+		exitf("ImageFileInput: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	err := opencodesdk.WithClient(ctx, func(c opencodesdk.Client) error {
-		sess, err := c.NewSession(ctx)
-		if err != nil {
-			return fmt.Errorf("new session: %w", err)
-		}
+	// Blocks(...) is sugar for []ContentBlock{...}. For text-only
+	// prompts you can use opencodesdk.Text("hi") instead.
+	blocks := opencodesdk.Blocks(
+		opencodesdk.TextBlock("Describe the attached image in one short sentence. Include the dominant colour."),
+		img,
+	)
 
-		go streamAssistantText(sess.Updates())
-
-		blocks := []acp.ContentBlock{
-			acp.TextBlock("Describe the attached image in one short sentence. Include the dominant colour."),
-			acp.ImageBlock(redSquarePNG, "image/png"),
-		}
-
-		res, err := sess.Prompt(ctx, blocks...)
-		if err != nil {
-			return fmt.Errorf("prompt: %w", err)
-		}
-
-		time.Sleep(100 * time.Millisecond)
-
-		fmt.Printf("\n\nstop: %s\n", res.StopReason)
-
-		return nil
-	},
+	res, err := opencodesdk.QueryContent(ctx, blocks,
 		opencodesdk.WithLogger(logger),
 		opencodesdk.WithCwd(cwd),
 	)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "WithClient: %v\n", err)
-		os.Exit(1)
+		exitf("QueryContent: %v", err)
+	}
+
+	fmt.Println(res.AssistantText)
+	fmt.Printf("\nstop: %s\n", res.StopReason)
+
+	if res.Usage != nil {
+		fmt.Printf("tokens: in=%d out=%d total=%d\n",
+			res.Usage.InputTokens, res.Usage.OutputTokens, res.Usage.TotalTokens)
 	}
 }
 
-func streamAssistantText(ch <-chan acp.SessionNotification) {
-	for n := range ch {
-		if n.Update.AgentMessageChunk == nil {
-			continue
-		}
-
-		if n.Update.AgentMessageChunk.Content.Text != nil {
-			fmt.Print(n.Update.AgentMessageChunk.Content.Text.Text)
-		}
-	}
+func exitf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
 }

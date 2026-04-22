@@ -1,11 +1,8 @@
 // Example prometheus_metrics demonstrates how to expose opencodesdk's
-// OTel metrics via a Prometheus /metrics endpoint. The SDK accepts any
-// metric.MeterProvider through WithMeterProvider; this example wires
-// one backed by a Prometheus registry, runs a single Query, and keeps
-// the HTTP server alive so you can scrape the resulting counters.
-//
-// This example lives in its own Go module because it adds Prometheus
-// dependencies that we don't want in opencodesdk's root module.
+// OTel metrics via a Prometheus /metrics endpoint using the SDK's
+// built-in WithPrometheusRegisterer option. The SDK wires an OTel
+// MeterProvider to the supplied registry and emits every
+// opencodesdk.* metric through the Prometheus bridge.
 //
 // Run:
 //
@@ -22,7 +19,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/ethpandaops/agent-sdk-observability/promexporter"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -33,11 +29,6 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 	reg := prometheus.NewRegistry()
-
-	mp, err := promexporter.NewMeterProvider(reg)
-	if err != nil {
-		exitf("create meter provider: %v", err)
-	}
 
 	// Serve /metrics in the background.
 	go func() {
@@ -62,14 +53,14 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	// Run a single one-shot Query with the meter provider attached. The
-	// SDK will record initialize duration, session lifecycle counters,
-	// permission outcomes, update-drops, and subprocess spans into the
-	// Prometheus registry.
+	// Run a single one-shot Query with the registerer attached. The SDK
+	// builds a Prometheus-backed MeterProvider internally and records
+	// initialize duration, session lifecycle counters, permission
+	// outcomes, update-drops, and subprocess spans into reg.
 	res, err := opencodesdk.Query(ctx, "Reply with one short sentence introducing yourself.",
 		opencodesdk.WithLogger(logger),
 		opencodesdk.WithCwd(cwd),
-		opencodesdk.WithMeterProvider(mp),
+		opencodesdk.WithPrometheusRegisterer(reg),
 	)
 	if err != nil {
 		exitf("Query: %v", err)
