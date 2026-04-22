@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Option configures a Client or a one-shot Query. Options are applied
@@ -49,6 +51,11 @@ type options struct {
 
 	// In-process tools served via the loopback MCP bridge.
 	sdkTools []Tool
+
+	// Observability providers. nil → OTel global providers (which
+	// default to noops).
+	meterProvider  metric.MeterProvider
+	tracerProvider trace.TracerProvider
 }
 
 // defaultOptions returns the zero-value options with safe defaults.
@@ -166,6 +173,18 @@ func WithMCPServers(servers ...acp.McpServer) Option {
 // Default: 128.
 func WithUpdatesBuffer(n int) Option {
 	return func(o *options) { o.updatesBuffer = n }
+}
+
+// WithMeterProvider sets the OTel MeterProvider for SDK metrics. When
+// nil, the OTel global provider is used (which is a noop unless the
+// application has installed one).
+func WithMeterProvider(mp metric.MeterProvider) Option {
+	return func(o *options) { o.meterProvider = mp }
+}
+
+// WithTracerProvider sets the OTel TracerProvider for SDK spans.
+func WithTracerProvider(tp trace.TracerProvider) Option {
+	return func(o *options) { o.tracerProvider = tp }
 }
 
 // WithTerminalAuthCapability advertises _meta["terminal-auth"]=true in

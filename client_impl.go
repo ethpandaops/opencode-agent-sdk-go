@@ -12,6 +12,7 @@ import (
 	"github.com/ethpandaops/opencode-agent-sdk-go/internal/cli"
 	"github.com/ethpandaops/opencode-agent-sdk-go/internal/handlers"
 	"github.com/ethpandaops/opencode-agent-sdk-go/internal/mcp/bridge"
+	"github.com/ethpandaops/opencode-agent-sdk-go/internal/observability"
 	"github.com/ethpandaops/opencode-agent-sdk-go/internal/subprocess"
 )
 
@@ -35,12 +36,15 @@ type client struct {
 	sessions   map[acp.SessionId]*session
 
 	bridge *bridge.Bridge
+
+	observer *observability.Observer
 }
 
 func newClient(o *options) (*client, error) {
 	return &client{
 		opts:     o,
 		sessions: make(map[acp.SessionId]*session),
+		observer: observability.NewObserver(o.meterProvider, o.tracerProvider),
 	}, nil
 }
 
@@ -84,8 +88,8 @@ func (c *client) Start(ctx context.Context) error {
 		Logger: c.opts.logger,
 		Callbacks: handlers.Callbacks{
 			SessionUpdate: c.routeSessionUpdate,
-			Permission:    handlers.PermissionCallback(c.opts.canUseTool),
-			FsWrite:       handlers.FsWriteCallback(c.opts.onFsWrite),
+			Permission:    c.instrumentedPermission(c.opts.canUseTool),
+			FsWrite:       c.instrumentedFsWrite(c.opts.onFsWrite),
 		},
 	}
 
@@ -441,7 +445,9 @@ func (c *client) deregisterSession(id acp.SessionId) {
 // callback. It looks up the target session and delivers the
 // notification to its updates channel, or logs and drops if the
 // session is unknown.
-func (c *client) routeSessionUpdate(_ context.Context, n acp.SessionNotification) error {
+func (c *client) routeSessionUpdate(ctx context.Context, n acp.SessionNotification) error {
+	c.observer.RecordSessionUpdate(ctx, sessionUpdateVariant(n.Update))
+
 	c.sessionsMu.RLock()
 	s, ok := c.sessions[n.SessionId]
 	c.sessionsMu.RUnlock()
@@ -457,6 +463,105 @@ func (c *client) routeSessionUpdate(_ context.Context, n acp.SessionNotification
 	s.deliver(n)
 
 	return nil
+}
+
+// instrumentedPermission wraps a PermissionCallback with observability
+// recording. If cb is nil the wrapper is also nil — the dispatcher's
+// default auto-reject path still runs, and we record that too.
+func (c *client) instrumentedPermission(cb PermissionCallback) handlers.PermissionCallback {
+	return func(ctx context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+		if cb == nil {
+			c.observer.RecordPermission(ctx, "auto_reject")
+
+			return acp.RequestPermissionResponse{}, errNoPermissionCallback
+		}
+
+		resp, err := cb(ctx, req)
+
+		outcome := "error"
+
+		switch {
+		case err != nil:
+		case resp.Outcome.Cancelled != nil:
+			outcome = "cancelled"
+		case resp.Outcome.Selected != nil:
+			outcome = "selected:" + string(resp.Outcome.Selected.OptionId)
+		}
+
+		c.observer.RecordPermission(ctx, outcome)
+
+		return resp, err
+	}
+}
+
+// instrumentedFsWrite wraps an FsWriteCallback with observability.
+func (c *client) instrumentedFsWrite(cb FsWriteCallback) handlers.FsWriteCallback {
+	return func(ctx context.Context, req acp.WriteTextFileRequest) error {
+		outcome := "default_write"
+		if cb != nil {
+			outcome = "handled"
+		}
+
+		err := func() error {
+			if cb == nil {
+				return errFsDefaultPath
+			}
+
+			return cb(ctx, req)
+		}()
+		if err != nil {
+			if errors.Is(err, errFsDefaultPath) {
+				c.observer.RecordFsDelegation(ctx, "write", outcome)
+
+				return nil // signal dispatcher to fall through to its default path
+			}
+
+			c.observer.RecordFsDelegation(ctx, "write", "error")
+
+			return err
+		}
+
+		c.observer.RecordFsDelegation(ctx, "write", outcome)
+
+		return nil
+	}
+}
+
+var (
+	errNoPermissionCallback = errors.New("opencodesdk: no permission callback configured")
+	errFsDefaultPath        = errors.New("opencodesdk: fall through to default fs write")
+)
+
+// sessionUpdateVariant returns the discriminator name of a
+// SessionUpdate union, used as the variant label on the session/update
+// counter.
+func sessionUpdateVariant(u acp.SessionUpdate) string {
+	switch {
+	case u.UserMessageChunk != nil:
+		return "user_message_chunk"
+	case u.AgentMessageChunk != nil:
+		return "agent_message_chunk"
+	case u.AgentThoughtChunk != nil:
+		return "agent_thought_chunk"
+	case u.ToolCall != nil:
+		return "tool_call"
+	case u.ToolCallUpdate != nil:
+		return "tool_call_update"
+	case u.Plan != nil:
+		return "plan"
+	case u.AvailableCommandsUpdate != nil:
+		return "available_commands_update"
+	case u.CurrentModeUpdate != nil:
+		return "current_mode_update"
+	case u.ConfigOptionUpdate != nil:
+		return "config_option_update"
+	case u.SessionInfoUpdate != nil:
+		return "session_info_update"
+	case u.UsageUpdate != nil:
+		return "usage_update"
+	default:
+		return "unknown"
+	}
 }
 
 // cwdOrEmpty returns o.cwd or the empty string. opencode validates

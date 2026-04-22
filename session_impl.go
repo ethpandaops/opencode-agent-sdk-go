@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+
+	"github.com/ethpandaops/opencode-agent-sdk-go/internal/observability"
 )
 
 // session is the concrete Session implementation.
@@ -114,6 +116,12 @@ func (s *session) Prompt(ctx context.Context, blocks ...acp.ContentBlock) (*Prom
 		return nil, errors.New("opencodesdk: Prompt requires at least one content block")
 	}
 
+	spanCtx, span := s.client.observer.StartPromptSpan(ctx, string(s.id))
+	defer span.End()
+
+	ctx = spanCtx
+	started := time.Now()
+
 	// Watch for ctx cancellation so we can send session/cancel
 	// notification to opencode. Without this, cancelling ctx would
 	// close the Prompt request but leave opencode running the turn.
@@ -158,11 +166,32 @@ func (s *session) Prompt(ctx context.Context, blocks ...acp.ContentBlock) (*Prom
 		return nil, wrapACPErr(err)
 	}
 
+	s.client.observer.RecordPrompt(ctx, time.Since(started), string(resp.StopReason), tokensFromUsage(resp.Usage))
+
 	return &PromptResult{
 		StopReason: resp.StopReason,
 		Usage:      resp.Usage,
 		Meta:       resp.Meta,
 	}, nil
+}
+
+// tokensFromUsage extracts the Observer's TokenCounts from an
+// acp.Usage. Zero values are fine — Observer skips zeroed buckets.
+func tokensFromUsage(u *acp.Usage) observability.TokenCounts {
+	if u == nil {
+		return observability.TokenCounts{}
+	}
+
+	tc := observability.TokenCounts{
+		Input:  int64(u.InputTokens),
+		Output: int64(u.OutputTokens),
+	}
+
+	if u.CachedReadTokens != nil {
+		tc.CachedRead = int64(*u.CachedReadTokens)
+	}
+
+	return tc
 }
 
 // Cancel emits a session/cancel notification for the current turn.
