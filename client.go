@@ -52,6 +52,19 @@ type Client interface {
 	// ListSessions enumerates sessions scoped to the configured cwd.
 	// Cursor is opaque; pass the return value's NextCursor to paginate.
 	ListSessions(ctx context.Context, cursor string) (sessions []SessionInfo, nextCursor string, err error)
+
+	// ForkSession creates a new session branched from an existing one
+	// (opencode unstable_forkSession RPC).
+	ForkSession(ctx context.Context, parentID string, opts ...Option) (Session, error)
+
+	// ResumeSession re-attaches to an existing session without the
+	// history-replay side effects of LoadSession (opencode
+	// unstable_resumeSession RPC).
+	ResumeSession(ctx context.Context, sessionID string, opts ...Option) (Session, error)
+
+	// UnstableSetModel issues opencode's unstable_setSessionModel RPC
+	// directly. Prefer Session.SetModel for normal use.
+	UnstableSetModel(ctx context.Context, sessionID, modelID string) error
 }
 
 // NewClient creates a new, un-started Client configured with the given
