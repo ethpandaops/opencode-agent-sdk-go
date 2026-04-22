@@ -26,6 +26,9 @@ func main() {
 	// Reverse takes a string and returns it backwards. The whole value
 	// of SDK tools is demonstrated here — the closure holds a live
 	// pointer to reverseCalls, something an external MCP server can't do.
+	// ToolAnnotations are advisory hints opencode forwards to the
+	// agent via MCP tools/list. Read-only / non-destructive tools
+	// should opt in so opencode's permission UI can reason about them.
 	reverse := opencodesdk.NewTool(
 		"reverse_string",
 		"Reverse the characters of the input string. Use when the user asks for a reversed or inverted version of text.",
@@ -51,6 +54,13 @@ func main() {
 
 			return opencodesdk.ToolResult{Text: string(runes)}, nil
 		},
+		opencodesdk.WithToolAnnotations(opencodesdk.ToolAnnotations{
+			Title:           "Reverse string",
+			ReadOnlyHint:    true,
+			DestructiveHint: opencodesdk.BoolPtr(false),
+			IdempotentHint:  true,
+			OpenWorldHint:   opencodesdk.BoolPtr(false),
+		}),
 	)
 
 	cwd, _ := os.Getwd()

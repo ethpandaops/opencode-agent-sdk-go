@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
@@ -39,6 +40,10 @@ type client struct {
 	protocolVer    acp.ProtocolVersion
 	authMethods    []acp.AuthMethod
 	subprocessSpan trace.Span
+	// transportErr, when non-nil, is the TransportError recorded when
+	// watchSubprocess observed the subprocess dying mid-session. RPC
+	// call sites surface it in preference to generic io/ctx errors.
+	transportErr *TransportError
 
 	sessionsMu sync.RWMutex
 	sessions   map[acp.SessionId]*session
@@ -114,7 +119,7 @@ func (c *client) Start(ctx context.Context) error {
 	defer c.mu.Unlock()
 
 	if c.started {
-		return errors.New("opencodesdk: client has already been started")
+		return ErrClientAlreadyConnected
 	}
 
 	if c.closed {
@@ -124,9 +129,11 @@ func (c *client) Start(ctx context.Context) error {
 	c.dispatcher = &handlers.Dispatcher{
 		Logger: c.opts.logger,
 		Callbacks: handlers.Callbacks{
-			SessionUpdate: c.routeSessionUpdate,
-			Permission:    c.instrumentedPermission(c.opts.canUseTool),
-			FsWrite:       c.instrumentedFsWrite(c.opts.onFsWrite),
+			SessionUpdate:       c.routeSessionUpdate,
+			Permission:          c.instrumentedPermission(c.opts.canUseTool),
+			FsWrite:             c.instrumentedFsWrite(c.opts.onFsWrite),
+			Elicitation:         c.instrumentedElicitation(c.opts.onElicitation),
+			ElicitationComplete: wrapElicitationComplete(c.opts.onElicitationComplete),
 		},
 		StrictCwdBoundary: c.opts.strictCwdBoundary,
 		Cwd:               c.opts.cwd,
@@ -218,7 +225,7 @@ func (c *client) buildTransport(ctx context.Context) (Transport, error) {
 
 	proc, err := subprocess.Spawn(ctx, subprocess.Config{
 		Path:           path,
-		Args:           c.opts.cliFlags,
+		Args:           subprocessArgs(c.opts),
 		Env:            subprocessEnv(c.opts),
 		Cwd:            c.opts.cwd,
 		Logger:         c.opts.logger,
@@ -289,6 +296,7 @@ func (c *client) watchSubprocess() {
 
 	c.mu.Lock()
 	c.closed = true
+	c.transportErr = &TransportError{Reason: "subprocess", Err: err}
 	c.mu.Unlock()
 }
 
@@ -417,6 +425,33 @@ func (c *client) BudgetTracker() *BudgetTracker {
 	return c.opts.budgetTracker
 }
 
+// CancelAll fans session/cancel notifications out across every live
+// session on the Client. See Client.CancelAll for semantics.
+func (c *client) CancelAll(ctx context.Context) error {
+	c.sessionsMu.RLock()
+	targets := make([]*session, 0, len(c.sessions))
+
+	for _, s := range c.sessions {
+		targets = append(targets, s)
+	}
+
+	c.sessionsMu.RUnlock()
+
+	if len(targets) == 0 {
+		return nil
+	}
+
+	errs := make([]error, 0, len(targets))
+
+	for _, s := range targets {
+		if err := s.Cancel(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("session %s: %w", s.ID(), err))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
 // AuthMethods returns the authentication methods the agent advertised
 // during Start.
 func (c *client) AuthMethods() []acp.AuthMethod {
@@ -438,6 +473,10 @@ func (c *client) NewSession(ctx context.Context, opts ...Option) (Session, error
 
 	merged := c.mergeOptions(opts)
 
+	if err := c.checkMCPCapabilities(merged.mcpServers); err != nil {
+		return nil, err
+	}
+
 	req := acp.NewSessionRequest{
 		Cwd:                   cwdOrEmpty(merged),
 		McpServers:            merged.mcpServers,
@@ -453,7 +492,7 @@ func (c *client) NewSession(ctx context.Context, opts ...Option) (Session, error
 	}
 
 	if err != nil {
-		return nil, wrapACPErr(err)
+		return nil, wrapACPErrCtx(ctx, err)
 	}
 
 	s := newSession(c, resp.SessionId, resp.Models, resp.Modes, resp.ConfigOptions, resp.Meta, merged.updatesBuffer)
@@ -477,6 +516,10 @@ func (c *client) LoadSession(ctx context.Context, id string, opts ...Option) (Se
 	}
 
 	merged := c.mergeOptions(opts)
+
+	if err := c.checkMCPCapabilities(merged.mcpServers); err != nil {
+		return nil, err
+	}
 
 	sessionID := acp.SessionId(id)
 
@@ -502,7 +545,7 @@ func (c *client) LoadSession(ctx context.Context, id string, opts ...Option) (Se
 	if err != nil {
 		c.teardownSession(s)
 
-		return nil, wrapACPErr(err)
+		return nil, wrapACPErrCtx(ctx, err)
 	}
 
 	s.initialModels = resp.Models
@@ -523,6 +566,13 @@ func (c *client) LoadSession(ctx context.Context, id string, opts ...Option) (Se
 }
 
 // ListSessions enumerates sessions scoped to the configured cwd.
+//
+// Cursor is the opaque pagination token echoed by the agent. opencode
+// 1.14.20 returns sessions in pages of 100 keyed by stringified page
+// number ("0", "1", "2", …); empty string requests the first page.
+// When opencode returns no NextCursor (last page), this method returns
+// "" — callers driving a manual pagination loop should treat that as
+// end-of-results. Prefer IterSessions for transparent pagination.
 func (c *client) ListSessions(ctx context.Context, cursor string) ([]SessionInfo, string, error) {
 	if err := c.ensureStarted(); err != nil {
 		return nil, "", err
@@ -549,7 +599,9 @@ func (c *client) ListSessions(ctx context.Context, cursor string) ([]SessionInfo
 	return resp.Sessions, nextCursor, nil
 }
 
-// applySessionConfig applies model/mode options via set_config_option.
+// applySessionConfig applies model/mode/effort options via
+// set_config_option (model + mode) and the variant-resolver path
+// (effort).
 func (c *client) applySessionConfig(ctx context.Context, s *session, o *options) error {
 	if o.model != "" {
 		if err := s.SetModel(ctx, o.model); err != nil {
@@ -561,6 +613,27 @@ func (c *client) applySessionConfig(ctx context.Context, s *session, o *options)
 		if err := s.SetMode(ctx, o.agent); err != nil {
 			return fmt.Errorf("applying WithAgent(%q): %w", o.agent, err)
 		}
+	}
+
+	if o.effort != "" {
+		modelID := o.model
+		if modelID == "" {
+			s.mu.Lock()
+			modelID = s.currentModel
+			s.mu.Unlock()
+		}
+
+		if modelID == "" {
+			s.logger.Debug("WithEffort no-op: no model id available to probe variants",
+				slog.String("effort", string(o.effort)),
+			)
+		} else if err := c.applyEffortOnSession(ctx, s, o.effort, modelID); err != nil {
+			return fmt.Errorf("applying WithEffort(%q): %w", o.effort, err)
+		}
+	}
+
+	if o.maxTurns > 0 {
+		attachMaxTurns(s, o.maxTurns)
 	}
 
 	return nil
@@ -628,6 +701,7 @@ func toolsToBridgeDefs(tools []Tool) []bridge.ToolDef {
 			Name:        tool.Name(),
 			Description: tool.Description(),
 			Schema:      tool.InputSchema(),
+			Annotations: toolAnnotationsFor(tool),
 			Handler: func(ctx context.Context, in map[string]any) (*bridge.ToolOutput, error) {
 				res, err := tool.Execute(ctx, in)
 				if err != nil {
@@ -646,11 +720,45 @@ func toolsToBridgeDefs(tools []Tool) []bridge.ToolDef {
 	return out
 }
 
+// toolAnnotationsFor pulls ToolAnnotations off a Tool (when it opts
+// in via the unexported annotatedTool interface) and translates them
+// into the mcp-go-sdk ToolAnnotations shape the bridge forwards
+// on-wire. Returns nil when no annotations were configured.
+func toolAnnotationsFor(t Tool) *mcp.ToolAnnotations {
+	at, ok := t.(annotatedTool)
+	if !ok {
+		return nil
+	}
+
+	ann := at.toolAnnotations()
+	if ann == nil {
+		return nil
+	}
+
+	out := &mcp.ToolAnnotations{
+		Title:           ann.Title,
+		ReadOnlyHint:    ann.ReadOnlyHint,
+		DestructiveHint: ann.DestructiveHint,
+		IdempotentHint:  ann.IdempotentHint,
+		OpenWorldHint:   ann.OpenWorldHint,
+	}
+
+	return out
+}
+
 func (c *client) ensureStarted() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.closed {
+		// watchSubprocess closes the client AND stashes a
+		// TransportError when the subprocess dies mid-session. Surface
+		// that typed error in preference to the generic closed
+		// sentinel so callers can errors.As it to see the cause.
+		if c.transportErr != nil {
+			return c.transportErr
+		}
+
 		return ErrClientClosed
 	}
 
@@ -1125,6 +1233,32 @@ func sessionNewMeta(o *options) map[string]any {
 	}
 
 	return map[string]any{"structuredOutputSchema": o.outputSchema}
+}
+
+// subprocessArgs flattens the configured CLI flags + extra-args map
+// into a single argv slice. WithCLIFlags entries appear first (in the
+// order they were registered); WithExtraArgs entries follow. Map
+// iteration order is randomised — callers that care about ordering
+// should use WithCLIFlags instead.
+func subprocessArgs(o *options) []string {
+	if len(o.cliExtraArgs) == 0 {
+		return o.cliFlags
+	}
+
+	out := make([]string, 0, len(o.cliFlags)+len(o.cliExtraArgs))
+	out = append(out, o.cliFlags...)
+
+	for name, value := range o.cliExtraArgs {
+		if value == nil {
+			out = append(out, "--"+name)
+
+			continue
+		}
+
+		out = append(out, "--"+name+"="+*value)
+	}
+
+	return out
 }
 
 // subprocessEnv builds the environment overlay for the opencode

@@ -4,9 +4,12 @@
 // The SDK exposes:
 //
 //   - Sentinel errors (ErrCLINotFound, ErrUnsupportedCLIVersion,
-//     ErrAuthRequired, ErrCancelled, ErrClientClosed, ErrClientNotStarted)
-//   - A *RequestError wrapper that carries any other ACP JSON-RPC error
-//     code through to callers
+//     ErrAuthRequired, ErrCancelled, ErrClientClosed, ErrClientNotStarted,
+//     ErrClientAlreadyConnected, ErrRequestTimeout, ErrTransport)
+//   - Typed errors (*RequestError, *CLINotFoundError, *ProcessError,
+//     *TransportError) that all satisfy the OpencodeSDKError marker
+//     interface so callers can distinguish SDK-originated errors from
+//     arbitrary Go errors in the same code path.
 //
 // This example trips each sentinel case deliberately so you can see
 // the shape of the resulting error.
@@ -38,6 +41,12 @@ func main() {
 	fmt.Println()
 
 	demoClientClosed(ctx, logger)
+	fmt.Println()
+
+	demoClientAlreadyConnected(ctx, logger)
+	fmt.Println()
+
+	demoSDKErrorMarker(ctx, logger)
 }
 
 // demoCLINotFound shows ErrCLINotFound by pinning WithCLIPath at a
@@ -96,6 +105,58 @@ func demoClientClosed(ctx context.Context, logger *slog.Logger) {
 	classify(err)
 }
 
+// demoClientAlreadyConnected shows ErrClientAlreadyConnected by
+// calling Start twice on the same Client.
+func demoClientAlreadyConnected(ctx context.Context, logger *slog.Logger) {
+	fmt.Println("== demoClientAlreadyConnected ==")
+
+	c, err := opencodesdk.NewClient(opencodesdk.WithLogger(logger))
+	if err != nil {
+		fmt.Printf("NewClient: %v\n", err)
+
+		return
+	}
+	defer c.Close()
+
+	err = c.Start(ctx)
+	if err != nil {
+		fmt.Printf("first Start failed (expected when opencode is missing/unauthenticated): %v\n", err)
+
+		return
+	}
+
+	err = c.Start(ctx)
+	classify(err)
+}
+
+// demoSDKErrorMarker shows the OpencodeSDKError marker interface:
+// every typed SDK error satisfies it, which lets callers distinguish
+// SDK-originated errors from arbitrary Go errors flowing through the
+// same code path.
+func demoSDKErrorMarker(_ context.Context, logger *slog.Logger) {
+	fmt.Println("== demoSDKErrorMarker ==")
+
+	c, err := opencodesdk.NewClient(
+		opencodesdk.WithLogger(logger),
+		opencodesdk.WithCLIPath("/nonexistent/opencode-binary"),
+	)
+	if err != nil {
+		fmt.Printf("NewClient: %v\n", err)
+
+		return
+	}
+	defer c.Close()
+
+	err = c.Start(context.Background())
+
+	var sdkErr opencodesdk.OpencodeSDKError
+	if errors.As(err, &sdkErr) {
+		fmt.Printf("err is an opencodesdk error: %T → %v\n", sdkErr, sdkErr)
+	} else {
+		fmt.Printf("err is NOT an opencodesdk error: %v\n", err)
+	}
+}
+
 // classify prints which sentinel the error matches, if any, then
 // demonstrates unwrapping a *RequestError with errors.As.
 func classify(err error) {
@@ -120,10 +181,21 @@ func classify(err error) {
 		fmt.Println("  → matches ErrClientClosed")
 	case errors.Is(err, opencodesdk.ErrClientNotStarted):
 		fmt.Println("  → matches ErrClientNotStarted")
+	case errors.Is(err, opencodesdk.ErrClientAlreadyConnected):
+		fmt.Println("  → matches ErrClientAlreadyConnected")
+	case errors.Is(err, opencodesdk.ErrRequestTimeout):
+		fmt.Println("  → matches ErrRequestTimeout")
+	case errors.Is(err, opencodesdk.ErrTransport):
+		fmt.Println("  → matches ErrTransport")
 	}
 
 	var re *opencodesdk.RequestError
 	if errors.As(err, &re) {
 		fmt.Printf("  → unwrapped RequestError: code=%d message=%q\n", re.Code, re.Message)
+	}
+
+	var te *opencodesdk.TransportError
+	if errors.As(err, &te) {
+		fmt.Printf("  → unwrapped TransportError: reason=%q cause=%v\n", te.Reason, te.Err)
 	}
 }

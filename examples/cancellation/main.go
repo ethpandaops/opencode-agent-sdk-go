@@ -3,6 +3,10 @@
 // stops the running turn promptly; the pending Prompt call then
 // returns an error that wraps [opencodesdk.ErrCancelled].
 //
+// See also [Client.CancelAll] for fanning cancel notifications across
+// every live session on a Client — useful for coordinated shutdown
+// when the caller no longer tracks individual Session handles.
+//
 //	go run ./examples/cancellation
 package main
 
@@ -43,12 +47,15 @@ func main() {
 		}()
 
 		// Fire a long-running prompt, then cancel it after 500ms.
+		// Demonstrates Client.CancelAll — an equivalent effect that
+		// fans session/cancel across every live session. Swap in
+		// sess.Cancel(ctx) when you only want to abort one session.
 		go func() {
 			time.Sleep(500 * time.Millisecond)
 			fmt.Println("\n\n[client] cancelling…")
 
-			if cancelErr := sess.Cancel(context.Background()); cancelErr != nil {
-				fmt.Fprintf(os.Stderr, "sess.Cancel: %v\n", cancelErr)
+			if cancelErr := c.CancelAll(context.Background()); cancelErr != nil {
+				fmt.Fprintf(os.Stderr, "c.CancelAll: %v\n", cancelErr)
 			}
 		}()
 

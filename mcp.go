@@ -54,8 +54,71 @@ type ToolResult struct {
 // state beyond a closure.
 type ToolFunc func(ctx context.Context, input map[string]any) (ToolResult, error)
 
+// ToolAnnotations is a set of MCP tool annotation hints the SDK
+// forwards through the loopback bridge to opencode. They are
+// advisory: opencode may display them or use them to build its
+// permission UI, but they do not alter invocation semantics.
+//
+// All fields are optional. Pointer-typed fields (DestructiveHint,
+// OpenWorldHint) distinguish "unset" from "explicitly false" per the
+// MCP spec defaults — use BoolPtr to set them.
+type ToolAnnotations struct {
+	// Title is a human-readable display title for the tool (falls back
+	// to the tool name when empty).
+	Title string
+	// ReadOnlyHint indicates the tool does not modify its environment.
+	// Default: false.
+	ReadOnlyHint bool
+	// DestructiveHint indicates the tool may perform destructive
+	// updates. Only meaningful when ReadOnlyHint == false. Default
+	// (per MCP spec) is true — pass BoolPtr(false) to explicitly mark
+	// a non-destructive tool.
+	DestructiveHint *bool
+	// IdempotentHint indicates repeated calls with the same arguments
+	// are a no-op beyond the first. Only meaningful when ReadOnlyHint
+	// == false. Default: false.
+	IdempotentHint bool
+	// OpenWorldHint indicates the tool interacts with an open world
+	// of external entities (e.g. web search). Default (per MCP spec)
+	// is true — pass BoolPtr(false) for closed-domain tools.
+	OpenWorldHint *bool
+}
+
+// BoolPtr returns a pointer to b. Convenience for populating the
+// pointer-valued fields on ToolAnnotations.
+func BoolPtr(b bool) *bool { return &b }
+
+// NewToolOption configures an optional field on a Tool constructed
+// via NewTool.
+type NewToolOption func(*toolConfig)
+
+// toolConfig is the internal aggregator for NewToolOption. Unexported
+// — callers configure through the exported WithXxx constructors.
+type toolConfig struct {
+	annotations *ToolAnnotations
+}
+
+// WithToolAnnotations attaches ToolAnnotations to a tool registered via
+// NewTool. The SDK forwards the annotations through its loopback MCP
+// bridge so opencode sees them on tools/list.
+//
+// Example:
+//
+//	t := opencodesdk.NewTool(
+//	    "read_file", "...", schema, fn,
+//	    opencodesdk.WithToolAnnotations(opencodesdk.ToolAnnotations{
+//	        Title:          "Read file",
+//	        ReadOnlyHint:   true,
+//	        OpenWorldHint:  opencodesdk.BoolPtr(false),
+//	    }),
+//	)
+func WithToolAnnotations(ann ToolAnnotations) NewToolOption {
+	return func(c *toolConfig) { c.annotations = &ann }
+}
+
 // NewTool constructs a Tool from a name, description, JSON schema, and
-// a handler function.
+// a handler function. Optional NewToolOption values (e.g.
+// WithToolAnnotations) customise non-essential metadata.
 //
 // Example:
 //
@@ -76,8 +139,19 @@ type ToolFunc func(ctx context.Context, input map[string]any) (ToolResult, error
 //	        return opencodesdk.ToolResult{Text: fmt.Sprintf("%v", a+b)}, nil
 //	    },
 //	)
-func NewTool(name, description string, schema map[string]any, fn ToolFunc) Tool {
-	return &funcTool{name: name, description: description, schema: schema, fn: fn}
+func NewTool(name, description string, schema map[string]any, fn ToolFunc, opts ...NewToolOption) Tool {
+	cfg := &toolConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	return &funcTool{
+		name:        name,
+		description: description,
+		schema:      schema,
+		fn:          fn,
+		annotations: cfg.annotations,
+	}
 }
 
 // WithSDKTools registers in-process tools that opencode can invoke.
@@ -99,6 +173,7 @@ type funcTool struct {
 	description string
 	schema      map[string]any
 	fn          ToolFunc
+	annotations *ToolAnnotations
 }
 
 func (t *funcTool) Name() string                { return t.name }
@@ -107,3 +182,12 @@ func (t *funcTool) InputSchema() map[string]any { return t.schema }
 func (t *funcTool) Execute(ctx context.Context, input map[string]any) (ToolResult, error) {
 	return t.fn(ctx, input)
 }
+
+// annotatedTool is the optional interface the bridge checks to pull
+// ToolAnnotations off a Tool. Kept internal — callers never implement
+// this directly; they set annotations via WithToolAnnotations.
+type annotatedTool interface {
+	toolAnnotations() *ToolAnnotations
+}
+
+func (t *funcTool) toolAnnotations() *ToolAnnotations { return t.annotations }

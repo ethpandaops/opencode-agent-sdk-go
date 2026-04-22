@@ -128,6 +128,18 @@ func (s *session) AvailableModels() []acp.ModelInfo {
 	return s.initialModels.AvailableModels
 }
 
+// AvailableModes returns the set of session modes advertised at
+// session creation. The slice reflects what opencode exposed at
+// session/new time (e.g. "build" / "plan" plus any user-configured
+// modes); it is not re-emitted via session/update.
+func (s *session) AvailableModes() []acp.SessionMode {
+	if s.initialModes == nil {
+		return nil
+	}
+
+	return s.initialModes.AvailableModes
+}
+
 // AvailableCommands returns the current slash-command snapshot. The
 // slice is a copy so callers may mutate it freely.
 func (s *session) AvailableCommands() []acp.AvailableCommand {
@@ -470,7 +482,11 @@ func (s *session) Prompt(ctx context.Context, blocks ...acp.ContentBlock) (*Prom
 	// the next unrelated error as ErrCancelled.
 	s.mu.Lock()
 	s.cancelIntended = false
-	labels := observability.PromptLabels{Model: s.currentModel, Mode: s.currentMode}
+	labels := observability.PromptLabels{
+		Model: s.currentModel,
+		Mode:  s.currentMode,
+		User:  s.client.opts.user,
+	}
 	s.mu.Unlock()
 
 	spanCtx, span := s.client.observer.StartPromptSpan(ctx, string(s.id), labels)
@@ -520,7 +536,7 @@ func (s *session) Prompt(ctx context.Context, blocks ...acp.ContentBlock) (*Prom
 		if intended || errors.Is(err, context.Canceled) {
 			promptErr = fmt.Errorf("%w: %w", ErrCancelled, err)
 		} else {
-			promptErr = wrapACPErr(err)
+			promptErr = wrapACPErrCtx(ctx, err)
 		}
 
 		s.fireTurnComplete(ctx, nil, promptErr)
@@ -613,6 +629,25 @@ func tokensFromUsage(u *acp.Usage) observability.TokenCounts {
 	}
 
 	return tc
+}
+
+// RunCommand sends a slash-command prompt to the session. See
+// Session.RunCommand for semantics.
+func (s *session) RunCommand(ctx context.Context, name string, args ...string) (*PromptResult, error) {
+	if name == "" {
+		return nil, errors.New("opencodesdk: RunCommand requires a non-empty command name")
+	}
+
+	cmd := name
+	if len(args) > 0 {
+		cmd = name + " " + strings.Join(args, " ")
+	}
+
+	if !strings.HasPrefix(cmd, "/") {
+		cmd = "/" + cmd
+	}
+
+	return s.Prompt(ctx, acp.TextBlock(cmd))
 }
 
 // Cancel emits a session/cancel notification for the current turn.

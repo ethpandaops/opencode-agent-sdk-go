@@ -62,7 +62,14 @@ type Client interface {
 	LoadSessionHistory(ctx context.Context, id string, opts ...Option) (*SessionHistory, error)
 
 	// ListSessions enumerates sessions scoped to the configured cwd.
-	// Cursor is opaque; pass the return value's NextCursor to paginate.
+	//
+	// opencode 1.14.20 paginates via a stringified page number ("0",
+	// "1", "2", …) rather than an opaque token. Pass empty string or
+	// "0" for the first page. Page size is fixed at 100. The returned
+	// nextCursor is the opaque echo from the agent; for opencode it is
+	// always either empty (last page) or the next page number — pass
+	// it back as-is to fetch the next page. Prefer IterSessions for
+	// transparent pagination.
 	ListSessions(ctx context.Context, cursor string) (sessions []SessionInfo, nextCursor string, err error)
 
 	// ForkSession creates a new session branched from an existing one
@@ -104,6 +111,15 @@ type Client interface {
 	// WithMaxBudgetUSD or WithBudgetTracker. Returns nil when no
 	// budget policy was configured.
 	BudgetTracker() *BudgetTracker
+
+	// CancelAll sends session/cancel to every live session owned by
+	// this Client. Returns a joined error when any individual cancel
+	// RPC fails (unaffected sessions are still signaled). ACP has no
+	// connection-level interrupt primitive; this is a client-side fan
+	// out over Session.Cancel, useful for coordinated shutdown or
+	// panic paths where the caller no longer tracks individual
+	// Session handles.
+	CancelAll(ctx context.Context) error
 }
 
 // NewClient creates a new, un-started Client configured with the given

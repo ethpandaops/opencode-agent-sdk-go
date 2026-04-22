@@ -23,6 +23,18 @@ type Session interface {
 	// in that case wraps ErrCancelled.
 	Prompt(ctx context.Context, blocks ...acp.ContentBlock) (*PromptResult, error)
 
+	// RunCommand invokes one of opencode's slash commands as a prompt
+	// turn. Equivalent to Prompt with a single TextBlock built from
+	// "/<name> <arg> <arg>..." — opencode interprets leading-slash text
+	// as a command invocation. The command list available for this
+	// session is exposed via AvailableCommands().
+	//
+	// Per the opencode 1.14.20 ACP probe, slash commands are not a
+	// distinct content-block kind; sending plain text with a leading
+	// slash is the supported invocation path. /undo and /redo are
+	// explicitly unsupported over ACP.
+	RunCommand(ctx context.Context, name string, args ...string) (*PromptResult, error)
+
 	// Cancel sends a session/cancel notification for the current turn.
 	// This is advisory — the turn's pending Prompt call returns with
 	// an error. Cancel is safe to call when no turn is in flight; it
@@ -83,6 +95,12 @@ type Session interface {
 	// for this session. Derived from InitialModels; returns nil if the
 	// agent did not advertise any.
 	AvailableModels() []acp.ModelInfo
+
+	// AvailableModes returns the list of session modes advertised by
+	// opencode for this session (e.g. the built-in ModeBuild /
+	// ModePlan plus any user-configured modes). Derived from
+	// InitialModes; returns nil if the agent did not advertise any.
+	AvailableModes() []acp.SessionMode
 
 	// AvailableCommands returns a snapshot of the slash commands the
 	// agent currently advertises. opencode emits these once per session,

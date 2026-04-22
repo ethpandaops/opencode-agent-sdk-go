@@ -52,3 +52,7 @@ graceful_shutdown_demo.txt
 /personality
 /service_tier
 /include_partial_messages
+cancellation
+sdk_tools
+plan_mode
+error_handling

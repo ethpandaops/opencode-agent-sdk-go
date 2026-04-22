@@ -56,6 +56,12 @@ func main() {
 		fmt.Printf("initial mode:  %s\n", modes.CurrentModeId)
 	}
 
+	fmt.Printf("available modes:\n")
+
+	for _, m := range sess.AvailableModes() {
+		fmt.Printf("  - %s (%s)\n", m.Id, m.Name)
+	}
+
 	// Typed subscribers so we can watch the mutations fire the right
 	// session/update notifications.
 	sess.Subscribe(opencodesdk.UpdateHandlers{
@@ -85,9 +91,9 @@ func main() {
 	}
 
 	// Switch mode: build -> plan. Many default installs have both.
-	fmt.Printf("\n== SetMode plan ==\n")
+	fmt.Printf("\n== SetMode %s ==\n", opencodesdk.ModePlan)
 
-	if mErr := sess.SetMode(ctx, "plan"); mErr != nil {
+	if mErr := sess.SetMode(ctx, opencodesdk.ModePlan); mErr != nil {
 		fmt.Printf("SetMode failed (non-fatal): %v\n", mErr)
 	}
 

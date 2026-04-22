@@ -103,6 +103,63 @@ func TestMCPTools_ToolError(t *testing.T) {
 	}
 }
 
+// TestMCPTools_ToolWithAnnotations — attaches ToolAnnotations to an
+// SDK tool and verifies the turn completes cleanly. opencode's bridge
+// forwards the annotations on tools/list; this test proves the
+// plumbing doesn't break the round trip. (Asserting the exact values
+// reached the agent would require intercepting MCP tools/list, which
+// the SDK does not expose.)
+func TestMCPTools_ToolWithAnnotations(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	var calls atomic.Int32
+
+	readOnly := opencodesdk.NewTool(
+		"lookup_constant",
+		"Returns a canonical numeric constant by name. Read-only.",
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{"type": "string"},
+			},
+			"required": []string{"name"},
+		},
+		func(_ context.Context, _ map[string]any) (opencodesdk.ToolResult, error) {
+			calls.Add(1)
+
+			return opencodesdk.ToolResult{Text: "42"}, nil
+		},
+		opencodesdk.WithToolAnnotations(opencodesdk.ToolAnnotations{
+			Title:           "Lookup Constant",
+			ReadOnlyHint:    true,
+			DestructiveHint: opencodesdk.BoolPtr(false),
+			IdempotentHint:  true,
+			OpenWorldHint:   opencodesdk.BoolPtr(false),
+		}),
+	)
+
+	res, err := opencodesdk.Query(ctx,
+		"Use the lookup_constant tool to look up the constant 'answer' and tell me what you got.",
+		opencodesdk.WithLogger(testLogger(t)),
+		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithSDKTools(readOnly),
+	)
+	if err != nil {
+		skipIfCLIUnavailable(t, err)
+		skipIfAuthRequired(t, err)
+		t.Fatalf("Query: %v", err)
+	}
+
+	if res.StopReason == "" {
+		t.Fatalf("expected stop reason; got %+v", res)
+	}
+
+	if calls.Load() == 0 {
+		t.Skipf("agent did not invoke the annotated tool; assistant said: %q", res.AssistantText)
+	}
+}
+
 // TestMCPTools_MultipleToolsCoexist registers two tools and verifies
 // the bridge serves both.
 func TestMCPTools_MultipleToolsCoexist(t *testing.T) {

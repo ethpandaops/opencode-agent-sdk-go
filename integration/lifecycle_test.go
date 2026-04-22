@@ -146,6 +146,106 @@ func TestLifecycle_StartWithBogusCLIPath(t *testing.T) {
 	}
 }
 
+// TestLifecycle_DoubleStart_ReturnsErrClientAlreadyConnected — Start
+// must refuse to run twice on the same Client.
+func TestLifecycle_DoubleStart_ReturnsErrClientAlreadyConnected(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	c, err := opencodesdk.NewClient(
+		opencodesdk.WithLogger(testLogger(t)),
+		opencodesdk.WithCwd(tempCwd(t)),
+	)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	if err := c.Start(ctx); err != nil {
+		skipIfCLIUnavailable(t, err)
+		skipIfAuthRequired(t, err)
+		t.Fatalf("first Start: %v", err)
+	}
+
+	err = c.Start(ctx)
+	if !errors.Is(err, opencodesdk.ErrClientAlreadyConnected) {
+		t.Fatalf("second Start: want ErrClientAlreadyConnected, got %v", err)
+	}
+}
+
+// TestLifecycle_CancelAll_NoSessions_ReturnsNil — CancelAll on a
+// freshly started client with no sessions is a no-op.
+func TestLifecycle_CancelAll_NoSessions_ReturnsNil(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	c, err := opencodesdk.NewClient(
+		opencodesdk.WithLogger(testLogger(t)),
+		opencodesdk.WithCwd(tempCwd(t)),
+	)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	if err := c.Start(ctx); err != nil {
+		skipIfCLIUnavailable(t, err)
+		skipIfAuthRequired(t, err)
+		t.Fatalf("Start: %v", err)
+	}
+
+	if err := c.CancelAll(ctx); err != nil {
+		t.Fatalf("CancelAll: %v", err)
+	}
+}
+
+// TestLifecycle_AvailableModes_ReturnsOpencodeDefaults — a freshly
+// created session should expose at least the built-in ModeBuild /
+// ModePlan modes via Session.AvailableModes.
+func TestLifecycle_AvailableModes_ReturnsOpencodeDefaults(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	c, err := opencodesdk.NewClient(
+		opencodesdk.WithLogger(testLogger(t)),
+		opencodesdk.WithCwd(tempCwd(t)),
+	)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	if err := c.Start(ctx); err != nil {
+		skipIfCLIUnavailable(t, err)
+		skipIfAuthRequired(t, err)
+		t.Fatalf("Start: %v", err)
+	}
+
+	sess, err := c.NewSession(ctx)
+	if err != nil {
+		skipIfAuthRequired(t, err)
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	modes := sess.AvailableModes()
+	if len(modes) == 0 {
+		t.Fatalf("AvailableModes empty; expected opencode to advertise at least build+plan")
+	}
+
+	ids := make(map[string]bool, len(modes))
+	for _, m := range modes {
+		ids[string(m.Id)] = true
+	}
+
+	if !ids[opencodesdk.ModeBuild] {
+		t.Errorf("AvailableModes missing %q; got %+v", opencodesdk.ModeBuild, modes)
+	}
+
+	if !ids[opencodesdk.ModePlan] {
+		t.Errorf("AvailableModes missing %q; got %+v", opencodesdk.ModePlan, modes)
+	}
+}
+
 // TestLifecycle_RapidStartCloseCycle — repeatedly spin up and tear
 // down a client. Catches leaks or races in the shutdown path.
 func TestLifecycle_RapidStartCloseCycle(t *testing.T) {

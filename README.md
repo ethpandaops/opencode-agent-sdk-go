@@ -204,16 +204,23 @@ program versus shelling out.
 | `WithCwd(path)` | working directory for opencode + sessions |
 | `WithCLIPath(path)` | pin the opencode binary |
 | `WithCLIFlags(args...)` | extra flags passed to `opencode acp` |
+| `WithExtraArgs(map)` | map-shaped sister of `WithCLIFlags`; nil values render as bare `--flag`, non-nil as `--flag=value` |
 | `WithEnv(map)` | overlay on inherited env |
 | `WithStderr(fn)` | stderr callback |
+| `WithUser(id)` | tags OTel spans + metrics with a `user` attribute (multi-tenant attribution) |
 | `WithInitializeTimeout(d)` | handshake timeout (default 60s) |
 | `WithSkipVersionCheck(bool)` | skip the ≥1.14.20 assertion |
 | `WithModel(id)` | applied via `session/set_config_option` |
-| `WithAgent(name)` | sets the opencode mode (`build`, `plan`, ...) |
+| `WithAgent(name)` | sets the opencode mode (`ModeBuild`, `ModePlan`, ...) |
+| `WithInitialMode(id)` | ACP-terminology alias for `WithAgent` |
+| `WithEffort(level)` | maps an abstract `EffortLow/Medium/High/Max` enum onto opencode's per-model variant strings (`/high`, `/xhigh`, `/max`, …) |
+| `WithMaxTurns(n)` | client-side cap on assistant messages per session; auto-cancels when exceeded |
 | `WithMCPServers(servers...)` | external MCP servers |
 | `WithSDKTools(tools...)` | in-process tools via the bridge |
 | `WithCanUseTool(cb)` | permission-prompt callback |
 | `WithOnFsWrite(cb)` | intercept `fs/write_text_file` |
+| `WithOnElicitation(cb)` | handle agent-initiated `elicitation/create` (ACP unstable); opencode 1.14.20 doesn't emit it yet — forward-compat stub |
+| `WithOnElicitationComplete(cb)` | observe `elicitation/complete` notifications for URL-mode elicitation |
 | `WithStrictCwdBoundary(bool)` | reject writes outside cwd |
 | `WithAddDirs(dirs...)` | extra workspace roots (ACP unstable, capability-gated) |
 | `WithPure()` | sugar for `--pure` — disables external opencode plugins |
@@ -232,10 +239,14 @@ claude and codex sister SDKs:
 - **MCP tool-author helpers** — `TextResult`, `ErrorResult`,
   `ImageResult`, `ParseArguments`, `SimpleSchema` build tool results
   and input schemas without hand-rolled `ToolResult` literals.
-- **Typed errors** — `*CLINotFoundError` and `*ProcessError` carry
-  structured diagnostic context (`SearchedPaths`, `ExitCode`,
-  `Stderr`) alongside the `ErrCLINotFound` / `ErrClientClosed`
-  sentinels.
+- **Typed errors** — `*CLINotFoundError`, `*ProcessError`,
+  `*TransportError`, and `*RequestError` carry structured diagnostic
+  context (`SearchedPaths`, `ExitCode`, `Stderr`, JSON-RPC code + data)
+  alongside the `ErrCLINotFound`, `ErrClientClosed`,
+  `ErrClientAlreadyConnected`, `ErrRequestTimeout`, `ErrTransport`
+  sentinels. All SDK-originated errors satisfy the `OpencodeSDKError`
+  marker interface so callers can distinguish them from arbitrary Go
+  errors with a single `errors.As` check.
 - **Transport health** — `Client.GetTransportHealth()` returns a
   `TransportHealth` snapshot with degradation flag, failure counts,
   and last-error details.
@@ -312,7 +323,7 @@ See [`examples/`](./examples/) for seven working programs:
 - `session_list` — list prior sessions with pagination
 - `permission_callback` — interactive permission UX
 - `fs_intercept` — capture writes in memory instead of on disk
-- `plan_mode` — `WithAgent("plan")` to trigger permission prompts out of the box
+- `plan_mode` — `WithInitialMode(ModePlan)` to trigger permission prompts out of the box
 - `cost_tracker` — aggregate per-session cost and persist snapshots
 - `resilient_query` — ResilientQuery with backoff + error classification
 - `hooks` — typed lifecycle hooks via `WithHooks`

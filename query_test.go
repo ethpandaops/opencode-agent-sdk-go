@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,19 @@ func (f *fakeSession) ID() string { return f.id }
 
 func (f *fakeSession) Prompt(ctx context.Context, blocks ...acp.ContentBlock) (*PromptResult, error) {
 	return f.prompt(ctx, blocks...)
+}
+
+func (f *fakeSession) RunCommand(ctx context.Context, name string, args ...string) (*PromptResult, error) {
+	cmd := name
+	if len(args) > 0 {
+		cmd = name + " " + strings.Join(args, " ")
+	}
+
+	if !strings.HasPrefix(cmd, "/") {
+		cmd = "/" + cmd
+	}
+
+	return f.prompt(ctx, acp.TextBlock(cmd))
 }
 
 func (f *fakeSession) Cancel(ctx context.Context) error {
@@ -59,6 +73,7 @@ func (f *fakeSession) InitialModes() *acp.SessionModeState             { return 
 func (f *fakeSession) InitialConfigOptions() []acp.SessionConfigOption { return nil }
 func (f *fakeSession) Meta() map[string]any                            { return nil }
 func (f *fakeSession) AvailableModels() []acp.ModelInfo                { return nil }
+func (f *fakeSession) AvailableModes() []acp.SessionMode               { return nil }
 func (f *fakeSession) AvailableCommands() []acp.AvailableCommand       { return nil }
 func (f *fakeSession) CurrentVariant() *VariantInfo                    { return nil }
 func (f *fakeSession) Subscribe(_ UpdateHandlers) func()               { return func() {} }

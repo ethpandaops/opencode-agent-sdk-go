@@ -23,11 +23,13 @@ type options struct {
 	// Subprocess lifecycle
 	cliPath          string
 	cliFlags         []string
+	cliExtraArgs     map[string]*string
 	env              map[string]string
 	cwd              string
 	opencodeHome     string
 	skipVersionCheck bool
 	stderr           func(line string)
+	user             string
 
 	// Logging
 	logger *slog.Logger
@@ -39,6 +41,8 @@ type options struct {
 	// each session created via this Client.
 	model      string
 	agent      string
+	effort     Effort
+	maxTurns   int
 	mcpServers []acp.McpServer
 	// additionalDirectories is forwarded as ACP's unstable
 	// additionalDirectories field on session/new, session/load,
@@ -51,10 +55,12 @@ type options struct {
 	updatesBuffer int
 
 	// Callbacks
-	canUseTool      PermissionCallback
-	onFsWrite       FsWriteCallback
-	onTurnComplete  TurnCompleteCallback
-	onUpdateDropped UpdateDroppedCallback
+	canUseTool            PermissionCallback
+	onFsWrite             FsWriteCallback
+	onTurnComplete        TurnCompleteCallback
+	onUpdateDropped       UpdateDroppedCallback
+	onElicitation         ElicitationCallback
+	onElicitationComplete ElicitationCompleteCallback
 
 	// Hook registrations keyed by event. Populated via WithHooks.
 	hooks map[HookEvent][]*HookMatcher
@@ -142,6 +148,39 @@ func WithCLIFlags(flags ...string) Option {
 	}
 }
 
+// WithExtraArgs is a map-shaped sister of WithCLIFlags for callers who
+// want to pass `--flag` or `--flag=value` entries by name. Each map
+// entry is rendered as one argv token: a nil value yields `--<name>`
+// (a bare boolean flag), a non-nil value yields `--<name>=<value>`.
+//
+// Map iteration order is randomised by Go's runtime — callers that
+// care about the order of identical flags should use WithCLIFlags
+// instead. WithExtraArgs is additive: subsequent calls accumulate.
+//
+// Mirrors the same option on the sister claude/codex SDKs.
+func WithExtraArgs(args map[string]*string) Option {
+	return func(o *options) {
+		if o.cliExtraArgs == nil {
+			o.cliExtraArgs = make(map[string]*string, len(args))
+		}
+
+		maps.Copy(o.cliExtraArgs, args)
+	}
+}
+
+// WithUser tags the SDK's OpenTelemetry spans and metrics with the
+// supplied user identifier. The value is exported as the `user` span
+// attribute and metric label on every operation that records OTel data
+// (initialize, prompt, tool call, permission, fs delegation,
+// session/update, transport health). Useful for multi-tenant hosts
+// that want per-user dashboards / cost attribution.
+//
+// The value is not sent to opencode; it lives entirely in the SDK's
+// observability layer.
+func WithUser(user string) Option {
+	return func(o *options) { o.user = user }
+}
+
 // WithEnv provides additional environment variables for the opencode
 // subprocess. The SDK inherits os.Environ() by default and overlays
 // these values (later entries win).
@@ -202,6 +241,19 @@ func WithModel(id string) Option {
 	return func(o *options) { o.model = id }
 }
 
+// Built-in opencode session modes. These match the values advertised
+// under ACP's `mode` SessionConfigOption in opencode 1.14.20. Users
+// may also configure additional modes in opencode.json.
+const (
+	// ModeBuild is opencode's default mode. It executes tools based
+	// on the configured permission ruleset.
+	ModeBuild = "build"
+	// ModePlan is opencode's read-only planning mode. It denies all
+	// edit tools inline (does NOT route through
+	// session/request_permission).
+	ModePlan = "plan"
+)
+
 // WithAgent selects the opencode agent (a.k.a. session mode) used by
 // new sessions. Valid values map to opencode's agent names — typical
 // defaults are "build", "plan", "general", "explore", "summarize".
@@ -211,8 +263,26 @@ func WithModel(id string) Option {
 // must configure explicit "ask" rules in their opencode.json (see the
 // WithCanUseTool doc). The built-in plan agent denies edits inline
 // rather than asking, so it does not route through the callback path.
+//
+// WithInitialMode is an alias for this option using ACP terminology
+// ("mode" rather than "agent"). Prefer whichever wording matches the
+// vocabulary already used by your codebase.
 func WithAgent(agent string) Option {
 	return func(o *options) { o.agent = agent }
+}
+
+// WithInitialMode is ACP-terminology sugar for WithAgent. Pass one of
+// the ModeBuild / ModePlan constants (or any other mode id advertised
+// under the session's `mode` config option) to select the session's
+// starting mode. Applied via session/set_config_option immediately
+// after session/new.
+//
+// Exactly equivalent to WithAgent — the two names exist so callers
+// who think in ACP's "mode" vocabulary and callers who think in
+// opencode's "agent" vocabulary both find the option they expect.
+// When both are supplied, the later one wins.
+func WithInitialMode(mode string) Option {
+	return WithAgent(mode)
 }
 
 // WithMCPServers declares external MCP servers to attach to every new
@@ -380,6 +450,20 @@ func WithBudgetTracker(t *BudgetTracker) Option {
 		o.budgetTracker = t
 		o.autoCancelOnBudget = false
 	}
+}
+
+// WithMaxTurns caps the number of agent turns observed on each session
+// created by the Client. opencode has no protocol-level turn limit, so
+// the cap is enforced client-side: every assistant_message_chunk
+// notification with start==true bumps a counter, and once the limit is
+// crossed the SDK calls Session.Cancel on the in-flight turn. Subsequent
+// Prompt calls on the same session run normally (opencode itself does
+// not track the cap).
+//
+// A value of 0 (the default) disables the cap. Counts are per-session,
+// not per-Client. Useful as a backstop against runaway agent loops.
+func WithMaxTurns(n int) Option {
+	return func(o *options) { o.maxTurns = n }
 }
 
 // WithAddDirs appends additional workspace root directories activated

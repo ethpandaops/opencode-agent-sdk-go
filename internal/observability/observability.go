@@ -38,6 +38,8 @@ type Observer struct {
 	retryAttempt       metric.Int64Counter
 	structuredDecode   metric.Int64Counter
 	transportFailure   metric.Int64Counter
+	elicitationRequest metric.Int64Counter
+	mcpCapReject       metric.Int64Counter
 }
 
 // NewObserver constructs an Observer. Either provider may be nil; in
@@ -136,6 +138,16 @@ func NewObserver(mp metric.MeterProvider, tp trace.TracerProvider) *Observer {
 		metric.WithDescription("Transport-layer failures observed by the Client, by kind"),
 	)
 
+	elicitationRequest, _ := meter.Int64Counter(
+		Namespace+".elicitation.request",
+		metric.WithDescription("Inbound agent-initiated elicitation/create requests, by mode + outcome"),
+	)
+
+	mcpCapReject, _ := meter.Int64Counter(
+		Namespace+".mcp.capability.reject",
+		metric.WithDescription("session/new|load|fork|resume calls rejected locally because an McpServer transport was not advertised, by transport"),
+	)
+
 	return &Observer{
 		tracer:             tracer,
 		promptDuration:     promptDuration,
@@ -153,7 +165,28 @@ func NewObserver(mp metric.MeterProvider, tp trace.TracerProvider) *Observer {
 		retryAttempt:       retryAttempt,
 		structuredDecode:   structuredDecode,
 		transportFailure:   transportFailure,
+		elicitationRequest: elicitationRequest,
+		mcpCapReject:       mcpCapReject,
 	}
+}
+
+// RecordElicitationRequest records one agent-initiated
+// elicitation/create request. mode is "form" or "url" (or "unknown"
+// when the discriminator is absent). outcome is "accept", "decline",
+// "cancel", "error", or "no_callback" when no user callback was
+// configured.
+func (o *Observer) RecordElicitationRequest(ctx context.Context, mode, outcome string) {
+	o.elicitationRequest.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("mode", mode),
+		attribute.String("outcome", outcome),
+	))
+}
+
+// RecordMCPCapabilityReject records one session-lifecycle call
+// rejected locally because an McpServer entry used a transport the
+// agent did not advertise. transport is "http", "sse", or "unknown".
+func (o *Observer) RecordMCPCapabilityReject(ctx context.Context, transport string) {
+	o.mcpCapReject.Add(ctx, 1, metric.WithAttributes(attribute.String("transport", transport)))
 }
 
 // RecordRetryAttempt records one ResilientQuery retry decision.
@@ -191,10 +224,11 @@ func (o *Observer) Tracer() trace.Tracer { return o.tracer }
 
 // PromptLabels describes the optional per-session attributes attached
 // to prompt-scoped metrics. Empty strings are dropped so sessions
-// without a configured model/mode don't emit empty labels.
+// without a configured model/mode/user don't emit empty labels.
 type PromptLabels struct {
 	Model string
 	Mode  string
+	User  string
 }
 
 // StartPromptSpan opens a span covering one session/prompt turn.
@@ -206,6 +240,10 @@ func (o *Observer) StartPromptSpan(ctx context.Context, sessionID string, labels
 
 	if labels.Mode != "" {
 		attrs = append(attrs, attribute.String("mode", labels.Mode))
+	}
+
+	if labels.User != "" {
+		attrs = append(attrs, attribute.String("user", labels.User))
 	}
 
 	return o.tracer.Start(ctx, Namespace+".session.prompt", trace.WithAttributes(attrs...))
@@ -254,6 +292,10 @@ func (o *Observer) RecordPrompt(ctx context.Context, duration time.Duration, sto
 		attrs = append(attrs, attribute.String("mode", labels.Mode))
 	}
 
+	if labels.User != "" {
+		attrs = append(attrs, attribute.String("user", labels.User))
+	}
+
 	o.promptDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(attrs...))
 
 	modelAttr := attribute.String("model", labels.Model)
@@ -266,6 +308,10 @@ func (o *Observer) RecordPrompt(ctx context.Context, duration time.Duration, sto
 		attrs := []attribute.KeyValue{attribute.String("direction", direction)}
 		if labels.Model != "" {
 			attrs = append(attrs, modelAttr)
+		}
+
+		if labels.User != "" {
+			attrs = append(attrs, attribute.String("user", labels.User))
 		}
 
 		o.promptTokens.Record(ctx, float64(value), metric.WithAttributes(attrs...))

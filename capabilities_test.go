@@ -2,6 +2,7 @@ package opencodesdk
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/coder/acp-go-sdk"
@@ -68,5 +69,60 @@ func TestCheckPromptCapabilitiesMixedBlocks(t *testing.T) {
 	err := c.checkPromptCapabilities(blocks)
 	if !errors.Is(err, ErrCapabilityUnavailable) {
 		t.Fatalf("expected ErrCapabilityUnavailable from audio block, got %v", err)
+	}
+}
+
+func TestCheckMCPCapabilities(t *testing.T) {
+	httpEntry := acp.McpServer{Http: &acp.McpServerHttpInline{Type: "http", Name: "remote", Url: "http://example.com/mcp"}}
+	sseEntry := acp.McpServer{Sse: &acp.McpServerSseInline{Type: "sse", Name: "events", Url: "http://example.com/sse"}}
+	stdioEntry := acp.McpServer{Stdio: &acp.McpServerStdio{Name: "local", Command: "/bin/echo"}}
+
+	tests := []struct {
+		name    string
+		caps    acp.McpCapabilities
+		servers []acp.McpServer
+		wantErr bool
+	}{
+		{name: "no servers is always allowed", caps: acp.McpCapabilities{}, servers: nil},
+		{name: "stdio always allowed (spec baseline)", caps: acp.McpCapabilities{}, servers: []acp.McpServer{stdioEntry}},
+		{name: "http allowed when declared", caps: acp.McpCapabilities{Http: true}, servers: []acp.McpServer{httpEntry}},
+		{name: "http blocked when undeclared", caps: acp.McpCapabilities{}, servers: []acp.McpServer{httpEntry}, wantErr: true},
+		{name: "sse allowed when declared", caps: acp.McpCapabilities{Sse: true}, servers: []acp.McpServer{sseEntry}},
+		{name: "sse blocked when undeclared", caps: acp.McpCapabilities{Http: true}, servers: []acp.McpServer{sseEntry}, wantErr: true},
+		{name: "mixed entries flagged on first offender", caps: acp.McpCapabilities{Http: true}, servers: []acp.McpServer{httpEntry, sseEntry}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestClient()
+			c.agentCaps = acp.AgentCapabilities{McpCapabilities: tt.caps}
+
+			err := c.checkMCPCapabilities(tt.servers)
+
+			switch {
+			case tt.wantErr && err == nil:
+				t.Fatalf("expected error for caps=%+v servers=%+v, got nil", tt.caps, tt.servers)
+			case tt.wantErr && !errors.Is(err, ErrCapabilityUnavailable):
+				t.Fatalf("expected ErrCapabilityUnavailable, got %v", err)
+			case !tt.wantErr && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestCheckMCPCapabilitiesErrorIncludesServerName(t *testing.T) {
+	c := newTestClient()
+	c.agentCaps = acp.AgentCapabilities{McpCapabilities: acp.McpCapabilities{}}
+
+	err := c.checkMCPCapabilities([]acp.McpServer{
+		{Http: &acp.McpServerHttpInline{Type: "http", Name: "my-server", Url: "http://example.com"}},
+	})
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "my-server") {
+		t.Fatalf("error should name the offending server, got %q", err.Error())
 	}
 }

@@ -1,6 +1,7 @@
 package opencodesdk
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -99,6 +100,9 @@ func TestSentinelErrors_AreDistinct(t *testing.T) {
 		ErrUnsupportedCLIVersion,
 		ErrClientClosed,
 		ErrClientNotStarted,
+		ErrClientAlreadyConnected,
+		ErrRequestTimeout,
+		ErrTransport,
 	}
 
 	for i, a := range sentinels {
@@ -111,6 +115,92 @@ func TestSentinelErrors_AreDistinct(t *testing.T) {
 				t.Fatalf("sentinel %d (%v) should not satisfy errors.Is against sentinel %d (%v)", i, a, j, b)
 			}
 		}
+	}
+}
+
+func TestWrapACPErrCtx_DeadlineWrapsErrRequestTimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Simulate an RPC returning a deadline-exceeded error.
+	base := fmt.Errorf("rpc failed: %w", context.DeadlineExceeded)
+
+	got := wrapACPErrCtx(ctx, base)
+	if !errors.Is(got, ErrRequestTimeout) {
+		t.Fatalf("expected errors.Is(ErrRequestTimeout), got %v", got)
+	}
+
+	// Still chains to the underlying deadline for consumers that
+	// already check for it.
+	if !errors.Is(got, context.DeadlineExceeded) {
+		t.Fatalf("expected errors.Is(context.DeadlineExceeded), got %v", got)
+	}
+}
+
+func TestWrapACPErrCtx_NonDeadlineFallsThroughToWrapACPErr(t *testing.T) {
+	// An ACP auth error should still classify via wrapACPErr paths.
+	acpErr := &acp.RequestError{Code: codeAuthRequired, Message: "no creds"}
+
+	got := wrapACPErrCtx(context.Background(), acpErr)
+	if !errors.Is(got, ErrAuthRequired) {
+		t.Fatalf("expected ErrAuthRequired, got %v", got)
+	}
+}
+
+func TestTransportError_IsAndUnwrap(t *testing.T) {
+	cause := errors.New("broken pipe")
+	te := &TransportError{Reason: "subprocess", Err: cause}
+
+	if !errors.Is(te, ErrTransport) {
+		t.Fatal("expected errors.Is(te, ErrTransport)")
+	}
+
+	if !errors.Is(te, cause) {
+		t.Fatal("expected errors.Is(te, cause) via Unwrap")
+	}
+
+	if te.Error() == "" {
+		t.Fatal("expected non-empty error message")
+	}
+}
+
+func TestTransportError_ErrorMessageShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		te   *TransportError
+	}{
+		{"reason+cause", &TransportError{Reason: "subprocess", Err: errors.New("boom")}},
+		{"cause-only", &TransportError{Err: errors.New("boom")}},
+		{"reason-only", &TransportError{Reason: "subprocess"}},
+		{"empty", &TransportError{}},
+	}
+
+	for _, tc := range cases {
+		if tc.te.Error() == "" {
+			t.Fatalf("%s: empty Error()", tc.name)
+		}
+	}
+}
+
+func TestOpencodeSDKError_MarkerInterface(t *testing.T) {
+	var target OpencodeSDKError
+
+	typed := []error{
+		&RequestError{Code: -32603, Message: "x"},
+		&CLINotFoundError{SearchedPaths: []string{"/nope"}},
+		&ProcessError{ExitCode: 1},
+		&TransportError{Reason: "subprocess"},
+	}
+
+	for _, err := range typed {
+		if !errors.As(err, &target) {
+			t.Fatalf("%T did not satisfy OpencodeSDKError marker", err)
+		}
+	}
+
+	// Plain Go errors must NOT satisfy the marker.
+	if errors.As(errors.New("plain"), &target) {
+		t.Fatal("plain error should not satisfy OpencodeSDKError")
 	}
 }
 

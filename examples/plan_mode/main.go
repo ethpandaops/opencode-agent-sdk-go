@@ -1,9 +1,13 @@
-// Demonstrates WithAgent("plan"). opencode's plan agent ships with a
-// permission ruleset that DENIES every edit outside the plans directory
-// — it does not route edit requests through session/request_permission.
-// Asking plan to modify a file reliably produces an inline refusal from
-// the model, which is useful when you want a read-only conversation
-// where the agent can reason about changes without applying them.
+// Demonstrates WithInitialMode(ModePlan). opencode's plan mode ships
+// with a permission ruleset that DENIES every edit — it does not route
+// edit requests through session/request_permission. Asking plan to
+// modify a file reliably produces an inline refusal from the model,
+// which is useful when you want a read-only conversation where the
+// agent can reason about changes without applying them.
+//
+// WithInitialMode is an ACP-terminology alias for WithAgent; pick
+// whichever reads better in context. ModeBuild and ModePlan are the
+// built-in mode ids that ship with opencode 1.14.20.
 //
 // If you want the interactive ask-path (session/request_permission)
 // instead, use the default `build` agent and set
@@ -41,7 +45,7 @@ func main() {
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(logger),
 		opencodesdk.WithCwd(sandbox),
-		opencodesdk.WithAgent("plan"),
+		opencodesdk.WithInitialMode(opencodesdk.ModePlan),
 	)
 	if err != nil {
 		exitf("NewClient: %v", err)
@@ -60,6 +64,19 @@ func main() {
 	if err != nil {
 		exitf("NewSession: %v", err)
 	}
+
+	fmt.Println("available modes:")
+
+	for _, m := range sess.AvailableModes() {
+		marker := " "
+		if string(m.Id) == opencodesdk.ModePlan {
+			marker = "*"
+		}
+
+		fmt.Printf("  %s %s (%s)\n", marker, m.Id, m.Name)
+	}
+
+	fmt.Println()
 
 	go func() {
 		for n := range sess.Updates() {

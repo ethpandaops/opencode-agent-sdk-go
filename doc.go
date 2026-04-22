@@ -46,6 +46,13 @@
 //   - permission and filesystem callbacks surfaced via WithCanUseTool
 //     and WithOnFsWrite, plus cwd-scoped write enforcement
 //     (WithStrictCwdBoundary).
+//   - agent-initiated elicitation handlers via
+//     [WithOnElicitation] and [WithOnElicitationComplete]
+//     (forward-compat for ACP's unstable elicitation/create;
+//     opencode 1.14.20 does not emit it yet).
+//   - per-session MCP-capability preflight: session/new is rejected
+//     locally with [ErrCapabilityUnavailable] when a configured
+//     McpServer entry uses a transport the agent did not advertise.
 //   - in-process tools via a loopback HTTP MCP bridge declared in
 //     session/new's mcpServers (WithSDKTools + the [Tool] interface).
 //   - opencode's terminal-auth launch-instruction extraction
@@ -53,13 +60,18 @@
 //     WithAutoLaunchLogin).
 //   - OpenTelemetry metrics and spans under the opencodesdk.* namespace
 //     (WithMeterProvider, WithTracerProvider).
-//   - typed errors for diagnostics ([CLINotFoundError], [ProcessError])
-//     alongside the sentinel errors, and transport health observation
-//     via [TransportHealth] + Client.GetTransportHealth.
+//   - typed errors for diagnostics ([CLINotFoundError], [ProcessError],
+//     [TransportError], [RequestError]) alongside the sentinel errors
+//     ([ErrCLINotFound], [ErrClientClosed], [ErrClientAlreadyConnected],
+//     [ErrRequestTimeout], [ErrTransport], ...). All SDK-originated
+//     errors satisfy the [OpencodeSDKError] marker interface.
+//     Transport health observable via [TransportHealth] +
+//     Client.GetTransportHealth.
 //   - MCP tool-author conveniences ([TextResult], [ErrorResult],
 //     [ImageResult], [ParseArguments], [SimpleSchema]) for building
 //     [Tool] implementations and [ToolResult] values without hand-
-//     rolled literals.
+//     rolled literals. [WithToolAnnotations] forwards read-only /
+//     destructive / idempotent / open-world hints to opencode.
 //   - persisted session-cost accounting via [CostTracker],
 //     [LoadSessionCost], and [SaveSessionCost] — snapshots land
 //     under $XDG_DATA_HOME/opencode/sdk/session-costs/.
@@ -83,6 +95,25 @@
 //   - tool-side MCP elicitation via [Elicit] — callable from within
 //     [Tool.Execute] to send a server-initiated prompt back through
 //     the loopback bridge to opencode's user.
+//   - coordinated shutdown via [Client.CancelAll], fanning
+//     session/cancel across every live session on the Client.
+//   - opencode session mode constants ([ModeBuild], [ModePlan]) plus
+//     the ACP-terminology option [WithInitialMode] as a sugar alias
+//     for [WithAgent], and [Session.AvailableModes] for enumerating
+//     the modes opencode advertised at session/new.
+//   - reasoning-effort enum [Effort] + [WithEffort] mapping abstract
+//     None/Low/Medium/High/Max levels onto opencode's per-model
+//     variant strings (probed at session creation; silent no-op when
+//     the model exposes no variants).
+//   - client-side per-session turn cap via [WithMaxTurns]: counts
+//     distinct assistant message ids and calls Session.Cancel when
+//     the cap is crossed (opencode has no protocol-level turn limit).
+//   - slash-command sugar via [Session.RunCommand] for invoking the
+//     commands opencode advertises in [Session.AvailableCommands].
+//   - OTel attribution via [WithUser] (adds a `user` span attribute +
+//     metric label across prompt-scoped instruments).
+//   - map-shaped CLI flags via [WithExtraArgs] alongside the slice
+//     form [WithCLIFlags].
 //
 // # Quick start
 //

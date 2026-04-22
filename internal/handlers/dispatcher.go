@@ -32,11 +32,22 @@ type FsWriteCallback func(ctx context.Context, req acp.WriteTextFileRequest) err
 // streamed by the agent.
 type SessionUpdateCallback func(ctx context.Context, params acp.SessionNotification) error
 
+// ElicitationCallback is invoked when the agent issues an
+// elicitation/create request (agent → client). Returning a non-nil
+// error surfaces as a JSON-RPC error to the agent.
+type ElicitationCallback func(ctx context.Context, req acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error)
+
+// ElicitationCompleteCallback is invoked for elicitation/complete
+// notifications. Notification-only: errors are not propagated.
+type ElicitationCompleteCallback func(ctx context.Context, params acp.UnstableCompleteElicitationNotification)
+
 // Callbacks bundles all user-supplied handler hooks.
 type Callbacks struct {
-	Permission    PermissionCallback
-	FsWrite       FsWriteCallback
-	SessionUpdate SessionUpdateCallback
+	Permission          PermissionCallback
+	FsWrite             FsWriteCallback
+	SessionUpdate       SessionUpdateCallback
+	Elicitation         ElicitationCallback
+	ElicitationComplete ElicitationCompleteCallback
 }
 
 // Dispatcher implements acp.Client by routing incoming RPCs into the
@@ -181,6 +192,37 @@ func assertWithinCwd(target, cwd string) error {
 
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("fs/write_text_file: path %q escapes cwd %q", target, absCwd)
+	}
+
+	return nil
+}
+
+// UnstableCreateElicitation routes an agent-initiated
+// elicitation/create request to the configured callback. When no
+// callback is set, we return a Decline response so the agent
+// gracefully recovers without the SDK having to synthesise a
+// JSON-RPC error from inside the handler.
+//
+// opencode 1.14.20 does not currently emit elicitation/create; this
+// handler is wired in anticipation of future ACP agents that do.
+func (d *Dispatcher) UnstableCreateElicitation(ctx context.Context, params acp.UnstableCreateElicitationRequest) (acp.UnstableCreateElicitationResponse, error) {
+	if d.Callbacks.Elicitation != nil {
+		return d.Callbacks.Elicitation(ctx, params)
+	}
+
+	d.Logger.WarnContext(ctx, "elicitation/create with no callback; auto-declining")
+
+	return acp.UnstableCreateElicitationResponse{
+		Decline: &acp.UnstableCreateElicitationDecline{Action: "decline"},
+	}, nil
+}
+
+// UnstableCompleteElicitation routes elicitation/complete
+// notifications to the configured callback. Notification-only: the
+// callback's return path does not surface back to the agent.
+func (d *Dispatcher) UnstableCompleteElicitation(ctx context.Context, params acp.UnstableCompleteElicitationNotification) error {
+	if d.Callbacks.ElicitationComplete != nil {
+		d.Callbacks.ElicitationComplete(ctx, params)
 	}
 
 	return nil

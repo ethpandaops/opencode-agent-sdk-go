@@ -91,6 +91,11 @@ type ToolDef struct {
 	Description string
 	Schema      map[string]any
 	Handler     HandlerFunc
+	// Annotations, when non-nil, is attached to the underlying MCP
+	// tool's Annotations field so opencode sees the hints on
+	// tools/list. See opencodesdk.ToolAnnotations for the public
+	// wrapper shape.
+	Annotations *mcp.ToolAnnotations
 }
 
 // Bridge is a running loopback HTTP MCP server.
@@ -232,6 +237,7 @@ func addTool(server *mcp.Server, def ToolDef, recorder InvocationRecorder) {
 		Name:        def.Name,
 		Description: def.Description,
 		InputSchema: def.Schema,
+		Annotations: def.Annotations,
 	}
 
 	record := func(ctx context.Context, status string) {
