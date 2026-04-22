@@ -46,6 +46,9 @@ type options struct {
 
 	// Auth
 	terminalAuthCapability bool
+
+	// In-process tools served via the loopback MCP bridge.
+	sdkTools []Tool
 }
 
 // defaultOptions returns the zero-value options with safe defaults.

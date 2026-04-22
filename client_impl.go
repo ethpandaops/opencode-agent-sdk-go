@@ -11,8 +11,11 @@ import (
 
 	"github.com/ethpandaops/opencode-agent-sdk-go/internal/cli"
 	"github.com/ethpandaops/opencode-agent-sdk-go/internal/handlers"
+	"github.com/ethpandaops/opencode-agent-sdk-go/internal/mcp/bridge"
 	"github.com/ethpandaops/opencode-agent-sdk-go/internal/subprocess"
 )
+
+const bridgeMcpName = "opencodesdk"
 
 // client is the concrete Client implementation.
 type client struct {
@@ -30,6 +33,8 @@ type client struct {
 
 	sessionsMu sync.RWMutex
 	sessions   map[acp.SessionId]*session
+
+	bridge *bridge.Bridge
 }
 
 func newClient(o *options) (*client, error) {
@@ -82,6 +87,19 @@ func (c *client) Start(ctx context.Context) error {
 			Permission:    handlers.PermissionCallback(c.opts.canUseTool),
 			FsWrite:       handlers.FsWriteCallback(c.opts.onFsWrite),
 		},
+	}
+
+	if len(c.opts.sdkTools) > 0 {
+		br, brErr := bridge.New(toolsToBridgeDefs(c.opts.sdkTools), c.opts.logger)
+		if brErr != nil {
+			return fmt.Errorf("creating mcp bridge: %w", brErr)
+		}
+
+		if brErr := br.Start(ctx); brErr != nil {
+			return fmt.Errorf("starting mcp bridge: %w", brErr)
+		}
+
+		c.bridge = br
 	}
 
 	proc, err := subprocess.Spawn(ctx, subprocess.Config{
@@ -173,6 +191,12 @@ func (c *client) Close() error {
 	c.sessions = map[acp.SessionId]*session{}
 
 	c.sessionsMu.Unlock()
+
+	if c.bridge != nil {
+		if err := c.bridge.Close(context.Background()); err != nil {
+			c.opts.logger.Warn("mcp bridge close failed", slog.Any("error", err))
+		}
+	}
 
 	if proc == nil {
 		return nil
@@ -320,7 +344,9 @@ func (c *client) applySessionConfig(ctx context.Context, s *session, o *options)
 }
 
 // mergeOptions produces a merged options set: Client-level defaults +
-// per-call overrides.
+// per-call overrides. The caller-visible mcpServers list is extended
+// with the bridge entry (if any) so every session/new/load gets the
+// in-process tools.
 func (c *client) mergeOptions(override []Option) *options {
 	merged := *c.opts
 	merged.mcpServers = append([]acp.McpServer{}, c.opts.mcpServers...)
@@ -329,7 +355,56 @@ func (c *client) mergeOptions(override []Option) *options {
 		opt(&merged)
 	}
 
+	if c.bridge != nil {
+		merged.mcpServers = append([]acp.McpServer{c.bridgeMcpServerEntry()}, merged.mcpServers...)
+	}
+
 	return &merged
+}
+
+// bridgeMcpServerEntry builds the McpServer union entry that points
+// opencode at our loopback MCP server, with the bearer token in the
+// Authorization header.
+func (c *client) bridgeMcpServerEntry() acp.McpServer {
+	return acp.McpServer{
+		Http: &acp.McpServerHttpInline{
+			Type: "http",
+			Name: bridgeMcpName,
+			Url:  c.bridge.URL(),
+			Headers: []acp.HttpHeader{
+				{Name: "Authorization", Value: "Bearer " + c.bridge.Token()},
+			},
+		},
+	}
+}
+
+// toolsToBridgeDefs maps opencodesdk.Tool instances to the bridge-
+// internal ToolDef shape used by internal/mcp/bridge.
+func toolsToBridgeDefs(tools []Tool) []bridge.ToolDef {
+	out := make([]bridge.ToolDef, 0, len(tools))
+
+	for _, t := range tools {
+		tool := t // capture
+		out = append(out, bridge.ToolDef{
+			Name:        tool.Name(),
+			Description: tool.Description(),
+			Schema:      tool.InputSchema(),
+			Handler: func(ctx context.Context, in map[string]any) (*bridge.ToolOutput, error) {
+				res, err := tool.Execute(ctx, in)
+				if err != nil {
+					return nil, err
+				}
+
+				return &bridge.ToolOutput{
+					Text:       res.Text,
+					Structured: res.Structured,
+					IsError:    res.IsError,
+				}, nil
+			},
+		})
+	}
+
+	return out
 }
 
 func (c *client) ensureStarted() error {
