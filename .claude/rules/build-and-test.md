@@ -26,8 +26,8 @@ go run ./examples/quick_start
 - If integration tests are not runnable in the current environment,
   call that out explicitly rather than skipping silently.
 
-## Migration-Specific
+## Commit Hygiene
 
-- Each commit on `feat/baseline` must pass `go build ./...`.
-- Tests green at milestone boundaries; mid-milestone red tests are OK
-  if called out in the commit message.
+- Every commit must pass `go build ./...`.
+- Do not land commits with red tests without calling it out explicitly
+  in the commit message.

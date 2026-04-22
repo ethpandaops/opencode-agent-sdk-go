@@ -34,6 +34,8 @@ func (c *client) ForkSession(ctx context.Context, parentID string, opts ...Optio
 	s := newSession(c, resp.SessionId, nil, resp.Modes, nil, resp.Meta, merged.updatesBuffer)
 
 	if err := c.applySessionConfig(ctx, s, merged); err != nil {
+		c.teardownSession(s)
+
 		return nil, err
 	}
 
@@ -64,8 +66,7 @@ func (c *client) ResumeSession(ctx context.Context, sessionID string, opts ...Op
 
 	resp, err := c.proc.Conn().UnstableResumeSession(ctx, req)
 	if err != nil {
-		c.deregisterSession(sid)
-		s.close()
+		c.teardownSession(s)
 
 		return nil, wrapACPErr(err)
 	}
@@ -74,6 +75,8 @@ func (c *client) ResumeSession(ctx context.Context, sessionID string, opts ...Op
 	s.meta = resp.Meta
 
 	if err := c.applySessionConfig(ctx, s, merged); err != nil {
+		c.teardownSession(s)
+
 		return nil, err
 	}
 

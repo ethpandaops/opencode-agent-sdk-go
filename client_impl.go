@@ -5,9 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"os"
+	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ethpandaops/opencode-agent-sdk-go/internal/cli"
 	"github.com/ethpandaops/opencode-agent-sdk-go/internal/handlers"
@@ -22,29 +27,49 @@ const bridgeMcpName = "opencodesdk"
 type client struct {
 	opts *options
 
-	mu          sync.Mutex
-	started     bool
-	closed      bool
-	proc        *subprocess.Process
-	dispatcher  *handlers.Dispatcher
-	agentCaps   acp.AgentCapabilities
-	agentInfo   acp.Implementation
-	protocolVer acp.ProtocolVersion
-	authMethods []acp.AuthMethod
+	mu             sync.Mutex
+	started        bool
+	closed         bool
+	proc           *subprocess.Process
+	dispatcher     *handlers.Dispatcher
+	agentCaps      acp.AgentCapabilities
+	agentInfo      acp.Implementation
+	protocolVer    acp.ProtocolVersion
+	authMethods    []acp.AuthMethod
+	subprocessSpan trace.Span
 
 	sessionsMu sync.RWMutex
 	sessions   map[acp.SessionId]*session
+	// pendingUpdates holds session/update notifications that arrived
+	// before the corresponding session was registered. This happens in
+	// narrow windows around NewSession/ForkSession where opencode emits
+	// notifications (e.g. available_commands_update fires ~1 tick after
+	// the lifecycle response) concurrently with our registration path.
+	// Drained into the session channel at registerSession time.
+	// Per-session cap: pendingUpdatesCap.
+	pendingUpdates map[acp.SessionId][]acp.SessionNotification
 
 	bridge *bridge.Bridge
 
 	observer *observability.Observer
+
+	// watchOnce guards the subprocess crash-monitor goroutine.
+	watchOnce sync.Once
 }
+
+// pendingUpdatesCap bounds the number of notifications we buffer for a
+// session before it has been registered. An opencode session emits a
+// handful of notifications in its first tick; 64 covers that plus
+// headroom without risking unbounded growth if a session ID never
+// registers (in which case Close drops the buffer).
+const pendingUpdatesCap = 64
 
 func newClient(o *options) (*client, error) {
 	return &client{
-		opts:     o,
-		sessions: make(map[acp.SessionId]*session),
-		observer: observability.NewObserver(o.meterProvider, o.tracerProvider),
+		opts:           o,
+		sessions:       make(map[acp.SessionId]*session),
+		pendingUpdates: make(map[acp.SessionId][]acp.SessionNotification),
+		observer:       observability.NewObserver(o.meterProvider, o.tracerProvider),
 	}, nil
 }
 
@@ -91,10 +116,12 @@ func (c *client) Start(ctx context.Context) error {
 			Permission:    c.instrumentedPermission(c.opts.canUseTool),
 			FsWrite:       c.instrumentedFsWrite(c.opts.onFsWrite),
 		},
+		StrictCwdBoundary: c.opts.strictCwdBoundary,
+		Cwd:               c.opts.cwd,
 	}
 
 	if len(c.opts.sdkTools) > 0 {
-		br, brErr := bridge.New(toolsToBridgeDefs(c.opts.sdkTools), c.opts.logger)
+		br, brErr := bridge.New(toolsToBridgeDefs(c.opts.sdkTools), c.opts.logger, c.observer)
 		if brErr != nil {
 			return fmt.Errorf("creating mcp bridge: %w", brErr)
 		}
@@ -106,6 +133,9 @@ func (c *client) Start(ctx context.Context) error {
 		c.bridge = br
 	}
 
+	// Subprocess span covers the child's lifetime — ended in Close.
+	_, c.subprocessSpan = c.observer.StartSubprocessSpan(ctx, path)
+
 	proc, err := subprocess.Spawn(ctx, subprocess.Config{
 		Path:           path,
 		Args:           c.opts.cliFlags,
@@ -115,9 +145,14 @@ func (c *client) Start(ctx context.Context) error {
 		StderrCallback: c.opts.stderr,
 	}, c.dispatcher)
 	if err != nil {
+		c.observer.RecordCLISpawn(ctx, "error")
+		c.subprocessSpan.End()
+		c.subprocessSpan = nil
+
 		return fmt.Errorf("spawning opencode acp: %w", err)
 	}
 
+	c.observer.RecordCLISpawn(ctx, "started")
 	c.proc = proc
 
 	if err := c.initialize(ctx); err != nil {
@@ -129,12 +164,64 @@ func (c *client) Start(ctx context.Context) error {
 
 	c.started = true
 
+	c.watchOnce.Do(func() { go c.watchSubprocess() })
+
 	return nil
+}
+
+// watchSubprocess fires when opencode exits unexpectedly mid-session.
+// It logs the cause, closes every live session (so callers blocked on
+// Updates() or a Prompt unblock), and leaves the client in the closed
+// state so subsequent RPCs return ErrClientClosed instead of hanging.
+func (c *client) watchSubprocess() {
+	proc := c.proc
+	if proc == nil {
+		return
+	}
+
+	<-proc.Exited()
+
+	err := proc.ExitErr()
+
+	c.mu.Lock()
+	closing := c.closed
+	c.mu.Unlock()
+
+	if closing {
+		return
+	}
+
+	if err != nil {
+		c.opts.logger.Error("opencode acp exited unexpectedly", slog.Any("error", err))
+	} else {
+		c.opts.logger.Warn("opencode acp exited unexpectedly (no error reported)")
+	}
+
+	// Close all live sessions so their Updates channels drain and any
+	// blocked Prompt calls unwind through context cancellation.
+	c.sessionsMu.Lock()
+
+	for _, s := range c.sessions {
+		s.close()
+	}
+
+	c.sessions = map[acp.SessionId]*session{}
+	c.pendingUpdates = map[acp.SessionId][]acp.SessionNotification{}
+	c.sessionsMu.Unlock()
+
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
 }
 
 func (c *client) initialize(ctx context.Context) error {
 	initCtx, cancel := context.WithTimeout(ctx, c.opts.initializeTimeout)
 	defer cancel()
+
+	spanCtx, span := c.observer.StartInitializeSpan(initCtx)
+	defer span.End()
+
+	started := time.Now()
 
 	caps := acp.ClientCapabilities{
 		Fs: acp.FileSystemCapabilities{
@@ -147,13 +234,17 @@ func (c *client) initialize(ctx context.Context) error {
 		caps.Meta = map[string]any{"terminal-auth": true}
 	}
 
-	resp, err := c.proc.Conn().Initialize(initCtx, acp.InitializeRequest{
+	resp, err := c.proc.Conn().Initialize(spanCtx, acp.InitializeRequest{
 		ProtocolVersion:    acp.ProtocolVersionNumber,
 		ClientCapabilities: caps,
 	})
 	if err != nil {
+		c.observer.RecordInitializeDuration(spanCtx, time.Since(started), false)
+
 		return wrapACPErr(err)
 	}
+
+	c.observer.RecordInitializeDuration(spanCtx, time.Since(started), true)
 
 	c.protocolVer = resp.ProtocolVersion
 	c.agentCaps = resp.AgentCapabilities
@@ -200,6 +291,11 @@ func (c *client) Close() error {
 		if err := c.bridge.Close(context.Background()); err != nil {
 			c.opts.logger.Warn("mcp bridge close failed", slog.Any("error", err))
 		}
+	}
+
+	if c.subprocessSpan != nil {
+		c.subprocessSpan.End()
+		c.subprocessSpan = nil
 	}
 
 	if proc == nil {
@@ -253,12 +349,20 @@ func (c *client) NewSession(ctx context.Context, opts ...Option) (Session, error
 
 	resp, err := c.proc.Conn().NewSession(ctx, req)
 	if err != nil {
+		if retryErr := c.maybeRelaunchLoginAndRetry(ctx, merged, err); retryErr == nil {
+			resp, err = c.proc.Conn().NewSession(ctx, req)
+		}
+	}
+
+	if err != nil {
 		return nil, wrapACPErr(err)
 	}
 
 	s := newSession(c, resp.SessionId, resp.Models, resp.Modes, resp.ConfigOptions, resp.Meta, merged.updatesBuffer)
 
 	if err := c.applySessionConfig(ctx, s, merged); err != nil {
+		c.teardownSession(s)
+
 		return nil, err
 	}
 
@@ -279,14 +383,21 @@ func (c *client) LoadSession(ctx context.Context, id string, opts ...Option) (Se
 	// session/update notifications are delivered into its updates channel.
 	s := newSession(c, sessionID, nil, nil, nil, nil, merged.updatesBuffer)
 
-	resp, err := c.proc.Conn().LoadSession(ctx, acp.LoadSessionRequest{
+	loadReq := acp.LoadSessionRequest{
 		SessionId:  sessionID,
 		Cwd:        cwdOrEmpty(merged),
 		McpServers: merged.mcpServers,
-	})
+	}
+
+	resp, err := c.proc.Conn().LoadSession(ctx, loadReq)
 	if err != nil {
-		c.deregisterSession(sessionID)
-		s.close()
+		if retryErr := c.maybeRelaunchLoginAndRetry(ctx, merged, err); retryErr == nil {
+			resp, err = c.proc.Conn().LoadSession(ctx, loadReq)
+		}
+	}
+
+	if err != nil {
+		c.teardownSession(s)
 
 		return nil, wrapACPErr(err)
 	}
@@ -297,6 +408,8 @@ func (c *client) LoadSession(ctx context.Context, id string, opts ...Option) (Se
 	s.meta = resp.Meta
 
 	if err := c.applySessionConfig(ctx, s, merged); err != nil {
+		c.teardownSession(s)
+
 		return nil, err
 	}
 
@@ -348,12 +461,22 @@ func (c *client) applySessionConfig(ctx context.Context, s *session, o *options)
 }
 
 // mergeOptions produces a merged options set: Client-level defaults +
-// per-call overrides. The caller-visible mcpServers list is extended
-// with the bridge entry (if any) so every session/new/load gets the
-// in-process tools.
+// per-call overrides. All mutable collections on the result are freshly
+// allocated so per-call overrides cannot corrupt the Client-level
+// options. The caller-visible mcpServers list is extended with the
+// bridge entry (if any) so every session/new/load gets the in-process
+// tools.
 func (c *client) mergeOptions(override []Option) *options {
 	merged := *c.opts
-	merged.mcpServers = append([]acp.McpServer{}, c.opts.mcpServers...)
+
+	merged.mcpServers = append([]acp.McpServer(nil), c.opts.mcpServers...)
+	merged.cliFlags = append([]string(nil), c.opts.cliFlags...)
+	merged.sdkTools = append([]Tool(nil), c.opts.sdkTools...)
+
+	if c.opts.env != nil {
+		merged.env = make(map[string]string, len(c.opts.env))
+		maps.Copy(merged.env, c.opts.env)
+	}
 
 	for _, opt := range override {
 		opt(&merged)
@@ -427,40 +550,70 @@ func (c *client) ensureStarted() error {
 }
 
 // registerSession records s in the client's session map so the
-// dispatcher can route session/update notifications to it.
+// dispatcher can route session/update notifications to it. Any
+// notifications that arrived before registration are flushed to s
+// before this returns so ordering is preserved.
 func (c *client) registerSession(s *session) {
 	c.sessionsMu.Lock()
 	c.sessions[s.id] = s
+	pending := c.pendingUpdates[s.id]
+	delete(c.pendingUpdates, s.id)
 	c.sessionsMu.Unlock()
+
+	for _, n := range pending {
+		s.deliver(n)
+	}
 }
 
-// deregisterSession removes a session from the routing map.
+// deregisterSession removes a session from the routing map and drops
+// any pending-updates buffer for it.
 func (c *client) deregisterSession(id acp.SessionId) {
 	c.sessionsMu.Lock()
 	delete(c.sessions, id)
+	delete(c.pendingUpdates, id)
 	c.sessionsMu.Unlock()
+}
+
+// teardownSession is the rollback path for session creation: close the
+// session's updates channel and remove it from routing. Callers invoke
+// this when post-creation work (applySessionConfig) fails and the
+// session must not leak.
+func (c *client) teardownSession(s *session) {
+	c.deregisterSession(s.id)
+	s.close()
 }
 
 // routeSessionUpdate is wired as the dispatcher's SessionUpdate
 // callback. It looks up the target session and delivers the
-// notification to its updates channel, or logs and drops if the
-// session is unknown.
+// notification to its updates channel. If the session isn't registered
+// yet (NewSession/ForkSession race window), the notification is
+// buffered in pendingUpdates and flushed when registerSession runs.
 func (c *client) routeSessionUpdate(ctx context.Context, n acp.SessionNotification) error {
 	c.observer.RecordSessionUpdate(ctx, sessionUpdateVariant(n.Update))
 
-	c.sessionsMu.RLock()
-	s, ok := c.sessions[n.SessionId]
-	c.sessionsMu.RUnlock()
+	c.sessionsMu.Lock()
 
-	if !ok {
-		c.opts.logger.Debug("session/update for unknown session; dropping",
+	s, ok := c.sessions[n.SessionId]
+	if ok {
+		c.sessionsMu.Unlock()
+		s.deliver(n)
+
+		return nil
+	}
+
+	buf := c.pendingUpdates[n.SessionId]
+	if len(buf) >= pendingUpdatesCap {
+		c.sessionsMu.Unlock()
+		c.opts.logger.Warn("session/update for unregistered session; dropping (buffer full)",
 			slog.String("session_id", string(n.SessionId)),
+			slog.Int("cap", pendingUpdatesCap),
 		)
 
 		return nil
 	}
 
-	s.deliver(n)
+	c.pendingUpdates[n.SessionId] = append(buf, n)
+	c.sessionsMu.Unlock()
 
 	return nil
 }
@@ -530,7 +683,68 @@ func (c *client) instrumentedFsWrite(cb FsWriteCallback) handlers.FsWriteCallbac
 var (
 	errNoPermissionCallback = errors.New("opencodesdk: no permission callback configured")
 	errFsDefaultPath        = errors.New("opencodesdk: fall through to default fs write")
+	errNoLoginLaunch        = errors.New("opencodesdk: no terminal-auth launch instructions to execute")
 )
+
+// maybeRelaunchLoginAndRetry checks whether err represents authRequired
+// and, if WithAutoLaunchLogin is enabled, spawns the opencode-supplied
+// terminal-auth command with stdio inherited from the parent process.
+// Returns nil on successful relaunch (caller should retry the RPC), or
+// a non-nil error if relaunch was not applicable or failed.
+func (c *client) maybeRelaunchLoginAndRetry(ctx context.Context, merged *options, rpcErr error) error {
+	if !merged.autoLaunchLogin {
+		return errNoLoginLaunch
+	}
+
+	if !errors.Is(wrapACPErr(rpcErr), ErrAuthRequired) {
+		return errNoLoginLaunch
+	}
+
+	launch := c.firstTerminalAuthLaunch()
+	if launch == nil {
+		return errNoLoginLaunch
+	}
+
+	c.opts.logger.InfoContext(ctx, "launching opencode auth flow",
+		slog.String("command", launch.Command),
+		slog.Any("args", launch.Args),
+	)
+
+	cmd := exec.CommandContext(ctx, launch.Command, launch.Args...) //nolint:gosec // launched from opencode-supplied _meta["terminal-auth"]
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if len(launch.Env) > 0 {
+		cmd.Env = os.Environ()
+		for k, v := range launch.Env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%w: terminal-auth command failed: %w", rpcErr, err)
+	}
+
+	return nil
+}
+
+// firstTerminalAuthLaunch returns the first TerminalAuthLaunch parsed
+// from the agent's advertised auth methods, or nil if none was
+// advertised.
+func (c *client) firstTerminalAuthLaunch() *TerminalAuthLaunch {
+	c.mu.Lock()
+	methods := append([]acp.AuthMethod(nil), c.authMethods...)
+	c.mu.Unlock()
+
+	for _, m := range methods {
+		if launch, ok := TerminalAuthInstructions(m); ok {
+			return launch
+		}
+	}
+
+	return nil
+}
 
 // sessionUpdateVariant returns the discriminator name of a
 // SessionUpdate union, used as the variant label on the session/update

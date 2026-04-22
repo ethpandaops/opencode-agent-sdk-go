@@ -4,14 +4,8 @@ Shared repository instructions for coding agents.
 
 ## Status
 
-This repository is mid-migration from `codex-agent-sdk-go` to an
-opencode-focused SDK built on top of
-[`coder/acp-go-sdk`](https://github.com/coder/acp-go-sdk). The migration
-plan + protocol reference lives in **INIT.md** at the repository root —
-read it before making changes.
-
-The `feat/baseline` branch is the migration branch. Do not push to
-`origin` during the migration.
+Opencode-focused Go SDK built on top of
+[`coder/acp-go-sdk`](https://github.com/coder/acp-go-sdk).
 
 ## Repository Facts
 
@@ -21,13 +15,15 @@ The `feat/baseline` branch is the migration branch. Do not push to
 - Minimum opencode CLI: `1.14.20+` (see `version.go`)
 - ACP protocol version: `1`
 
-## Core APIs (target; being built)
+## Core APIs
 
-- One-shot: `Query(ctx, prompt, opts...)`
-- Streaming input: `QueryStream(ctx, messages, opts...)`
+- One-shot: `Query(ctx, prompt, opts...) (*QueryResult, error)`
+- Multi-prompt iterator: `QueryStream(ctx, prompts, opts...)`
 - Stateful sessions: `NewClient(opts...)` + `Client` + `Session`
-- Lifecycle helper: `WithClient(ctx, fn, opts...)`
-- Session listing: `Client.ListSessions(ctx, opts...)`
+- Lifecycle helper: `WithClient(ctx, fn, opts...) error`
+- Session listing: `Client.ListSessions(ctx, cursor)`
+- opencode unstable: `Client.ForkSession`, `Client.ResumeSession`,
+  `Client.UnstableSetModel`
 
 ## Canonical Commands
 
@@ -55,7 +51,6 @@ Integration tests live under `integration/` and require `opencode` in `$PATH`.
 
 Always:
 
-- Read INIT.md before structural changes during migration.
 - Follow nearby code patterns before introducing new patterns.
 - Keep behavior changes covered by tests in the same commit.
 - Keep docs aligned when public behavior changes (README.md, doc.go).
@@ -63,15 +58,14 @@ Always:
 Ask first:
 
 - Adding exported API surface.
-- Adding new third-party dependencies beyond those listed in INIT.md.
-- Changing behaviors documented in INIT.md's locked decisions.
+- Adding new third-party dependencies beyond those already in `go.mod`.
+- Changing transport or protocol semantics.
 
 Never:
 
 - Ignore returned errors.
 - Store `context.Context` in structs.
-- Reintroduce codex-specific terminology or backend-selection logic.
-- Push `feat/baseline` to `origin` during migration.
+- Reintroduce dual-backend routing or a client-side session store.
 
 ## Claude Modules
 

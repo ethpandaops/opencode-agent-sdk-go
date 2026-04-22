@@ -44,6 +44,12 @@ type Callbacks struct {
 type Dispatcher struct {
 	Callbacks Callbacks
 	Logger    *slog.Logger
+
+	// StrictCwdBoundary rejects fs/write_text_file delegations for any
+	// path outside Cwd. If StrictCwdBoundary is true but Cwd is empty,
+	// every write is rejected.
+	StrictCwdBoundary bool
+	Cwd               string
 }
 
 var _ acp.Client = (*Dispatcher)(nil)
@@ -90,9 +96,9 @@ func (d *Dispatcher) RequestPermission(ctx context.Context, params acp.RequestPe
 }
 
 // ReadTextFile handles fs/read_text_file delegations. opencode never
-// emits these at present (see INIT.md Part 1) but we implement the
-// method anyway because we advertise fs.readTextFile capability and
-// coder SDK requires the full interface.
+// emits these at present, but we implement the method anyway because
+// we advertise fs.readTextFile capability and coder SDK requires the
+// full interface.
 func (d *Dispatcher) ReadTextFile(_ context.Context, params acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
 	if !filepath.IsAbs(params.Path) {
 		return acp.ReadTextFileResponse{}, fmt.Errorf("fs/read_text_file: path must be absolute: %q", params.Path)
@@ -116,6 +122,12 @@ func (d *Dispatcher) ReadTextFile(_ context.Context, params acp.ReadTextFileRequ
 // with on-disk state. Default behavior is to write through; callers
 // can override via FsWriteCallback.
 func (d *Dispatcher) WriteTextFile(ctx context.Context, params acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
+	if d.StrictCwdBoundary {
+		if err := assertWithinCwd(params.Path, d.Cwd); err != nil {
+			return acp.WriteTextFileResponse{}, err
+		}
+	}
+
 	if d.Callbacks.FsWrite != nil {
 		if err := d.Callbacks.FsWrite(ctx, params); err != nil {
 			return acp.WriteTextFileResponse{}, err
@@ -140,6 +152,38 @@ func (d *Dispatcher) WriteTextFile(ctx context.Context, params acp.WriteTextFile
 	}
 
 	return acp.WriteTextFileResponse{}, nil
+}
+
+// assertWithinCwd verifies that a write target is inside the
+// configured cwd. cwd must be non-empty when StrictCwdBoundary is on —
+// otherwise every write is refused because there's no boundary to
+// check against.
+func assertWithinCwd(target, cwd string) error {
+	if cwd == "" {
+		return fmt.Errorf("fs/write_text_file: strict-cwd-boundary enabled with no cwd configured; rejecting %q", target)
+	}
+
+	if !filepath.IsAbs(target) {
+		return fmt.Errorf("fs/write_text_file: path must be absolute: %q", target)
+	}
+
+	absCwd, err := filepath.Abs(cwd)
+	if err != nil {
+		return fmt.Errorf("fs/write_text_file: resolve cwd %q: %w", cwd, err)
+	}
+
+	clean := filepath.Clean(target)
+
+	rel, err := filepath.Rel(absCwd, clean)
+	if err != nil {
+		return fmt.Errorf("fs/write_text_file: path %q not under cwd %q: %w", target, absCwd, err)
+	}
+
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("fs/write_text_file: path %q escapes cwd %q", target, absCwd)
+	}
+
+	return nil
 }
 
 // Terminal methods — opencode never uses these. We return not-implemented.
@@ -172,10 +216,7 @@ func applyLineLimit(content string, line, limit *int) string {
 
 	start := 0
 	if line != nil && *line > 0 {
-		start = *line - 1
-		if start > len(lines) {
-			start = len(lines)
-		}
+		start = min(*line-1, len(lines))
 	}
 
 	end := len(lines)

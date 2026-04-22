@@ -5,48 +5,46 @@
 // the protocol layer supplied by github.com/coder/acp-go-sdk, and
 // adds:
 //
-//   - a stateful [Client] and [Session] API with functional options
-//     (NewClient, WithCwd, WithModel, WithAgent, WithSDKTools, etc.)
+//   - one-shot and lifecycle helpers ([Query], [QueryStream],
+//     [WithClient]) for simple cases, plus a stateful [Client] and
+//     [Session] API with functional options for long-running use.
 //   - typed wrappers for opencode-specific unstable RPCs
 //     (Client.ForkSession, Client.ResumeSession,
 //     Client.UnstableSetModel) and the _meta.opencode.variant channel
-//     (OpencodeVariant)
+//     (OpencodeVariant).
 //   - permission and filesystem callbacks surfaced via WithCanUseTool
-//     and WithOnFsWrite
+//     and WithOnFsWrite, plus cwd-scoped write enforcement
+//     (WithStrictCwdBoundary).
 //   - in-process tools via a loopback HTTP MCP bridge declared in
-//     session/new's mcpServers (WithSDKTools + the [Tool] interface)
+//     session/new's mcpServers (WithSDKTools + the [Tool] interface).
 //   - opencode's terminal-auth launch-instruction extraction
-//     (WithTerminalAuthCapability, TerminalAuthInstructions)
+//     (WithTerminalAuthCapability, TerminalAuthInstructions,
+//     WithAutoLaunchLogin).
 //   - OpenTelemetry metrics and spans under the opencodesdk.* namespace
-//     (WithMeterProvider, WithTracerProvider)
+//     (WithMeterProvider, WithTracerProvider).
 //
 // # Quick start
 //
-//	c, err := opencodesdk.NewClient(opencodesdk.WithCwd("/tmp"))
-//	if err != nil { /* ... */ }
-//	defer c.Close()
+// One-shot:
 //
-//	ctx := context.Background()
-//	if err := c.Start(ctx); err != nil { /* ... */ }
+//	res, err := opencodesdk.Query(ctx, "Say hello.", opencodesdk.WithCwd(cwd))
 //
-//	sess, err := c.NewSession(ctx)
-//	if err != nil { /* ... */ }
+// Lifecycle helper:
 //
-//	go func() {
-//	    for n := range sess.Updates() {
-//	        // inspect n.Update.AgentMessageChunk, ToolCall, etc.
-//	    }
-//	}()
-//
-//	res, err := sess.Prompt(ctx, acp.TextBlock("Say hello."))
+//	err := opencodesdk.WithClient(ctx, func(c opencodesdk.Client) error {
+//	    sess, err := c.NewSession(ctx)
+//	    if err != nil { return err }
+//	    _, err = sess.Prompt(ctx, acp.TextBlock("Say hello."))
+//	    return err
+//	}, opencodesdk.WithCwd(cwd))
 //
 // # Requirements
 //
 //   - opencode CLI >= [MinimumCLIVersion] available in $PATH
 //   - ACP protocol version [ProtocolVersion]
 //   - A completed `opencode auth login` (the SDK does not initiate
-//     auth; it catches missing-credentials errors and surfaces
-//     [ErrAuthRequired] so callers can instruct the user)
+//     auth on its own; with [WithAutoLaunchLogin] it can exec the
+//     command opencode advertises in _meta["terminal-auth"])
 //
 // # Scope
 //
@@ -55,7 +53,4 @@
 // opinionated options (agent modes, unstable_* wrappers,
 // _meta.opencode parsers, HTTP MCP bridge port picker) are
 // opencode-shaped.
-//
-// See INIT.md in the repository root for the protocol reference and
-// the locked design decisions behind this SDK.
 package opencodesdk

@@ -46,9 +46,15 @@ type Process struct {
 	stdout io.ReadCloser
 	logger *slog.Logger
 
-	closeOnce sync.Once
-	closeErr  error
-	waitErr   chan error
+	closeOnce    sync.Once
+	closed       chan struct{} // closed when Close() is invoked
+	shuttingDown chan struct{} // closed right before we attempt graceful stdin close
+	closeErr     error
+	waitErr      chan error
+
+	exitErrOnce sync.Once
+	exitErr     error
+	exited      chan struct{} // closed after the subprocess has actually exited
 }
 
 // Spawn launches opencode acp with the supplied configuration and wires
@@ -69,10 +75,9 @@ func Spawn(ctx context.Context, cfg Config, client acp.Client) (*Process, error)
 	}
 
 	// --hostname and --port are explicit to keep opencode's internal HTTP
-	// server (used by its ACP bridge internally, see INIT.md Part 2) on a
-	// loopback ephemeral port. They default to 127.0.0.1:0 in opencode
-	// itself but setting them explicitly insulates us from future
-	// default changes.
+	// server (used by its ACP bridge internally) on a loopback ephemeral
+	// port. They default to 127.0.0.1:0 in opencode itself but setting
+	// them explicitly insulates us from future default changes.
 	args := []string{"acp", "--hostname", "127.0.0.1", "--port", "0"}
 	if cfg.Cwd != "" {
 		args = append(args, "--cwd", cfg.Cwd)
@@ -89,6 +94,11 @@ func Spawn(ctx context.Context, cfg Config, client acp.Client) (*Process, error)
 	if cfg.Cwd != "" {
 		cmd.Dir = cfg.Cwd
 	}
+
+	// Put opencode in its own process group so Close() can deliver a
+	// group-wide SIGKILL that also reaps any children opencode spawned
+	// (stdio MCP servers, internal subprocesses, etc.).
+	configureProcessGroup(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -126,21 +136,60 @@ func Spawn(ctx context.Context, cfg Config, client acp.Client) (*Process, error)
 	go drainStderr(stderr, cfg.Logger, cfg.StderrCallback)
 
 	p := &Process{
-		cmd:     cmd,
-		stdin:   stdin,
-		stdout:  stdout,
-		logger:  cfg.Logger,
-		waitErr: make(chan error, 1),
+		cmd:          cmd,
+		stdin:        stdin,
+		stdout:       stdout,
+		logger:       cfg.Logger,
+		waitErr:      make(chan error, 1),
+		closed:       make(chan struct{}),
+		shuttingDown: make(chan struct{}),
+		exited:       make(chan struct{}),
 	}
 
 	p.conn = acp.NewClientSideConnection(client, stdin, stdout)
 	p.conn.SetLogger(cfg.Logger)
 
 	go func() {
-		p.waitErr <- cmd.Wait()
+		err := cmd.Wait()
+		p.setExitErr(err)
+		close(p.exited)
+
+		p.waitErr <- err
 	}()
 
 	return p, nil
+}
+
+// Exited returns a channel that is closed after the subprocess has
+// exited (for any reason — clean shutdown, crash, or SIGKILL).
+func (p *Process) Exited() <-chan struct{} { return p.exited }
+
+// ExitErr returns the subprocess's exit error once Exited() has fired.
+// Returns nil before exit, and nil if the subprocess exited cleanly or
+// via our intentional shutdown.
+func (p *Process) ExitErr() error {
+	select {
+	case <-p.exited:
+	default:
+		return nil
+	}
+
+	return p.exitErr
+}
+
+func (p *Process) setExitErr(err error) {
+	p.exitErrOnce.Do(func() {
+		select {
+		case <-p.shuttingDown:
+			// Close() initiated shutdown; any exit error is expected.
+			return
+		default:
+		}
+
+		if err != nil && !isNormalTermination(err) {
+			p.exitErr = err
+		}
+	})
 }
 
 // Conn returns the underlying ClientSideConnection for making outbound
@@ -155,21 +204,22 @@ func (p *Process) Done() <-chan struct{} {
 }
 
 // Close shuts down the subprocess. It closes stdin (requesting graceful
-// shutdown), waits up to 5s for the process to exit, then SIGKILLs.
-// Close is idempotent and safe to call after Start failures.
+// shutdown), waits up to 5s for the process to exit, then delivers a
+// process-group-wide SIGKILL so any children opencode spawned are also
+// reaped. Close is idempotent and safe to call after Start failures.
 func (p *Process) Close() error {
 	p.closeOnce.Do(func() {
+		close(p.shuttingDown)
 		_ = p.stdin.Close()
 
 		select {
-		case err := <-p.waitErr:
-			if err != nil && !isExpectedExitErr(err) {
-				p.closeErr = fmt.Errorf("opencode acp exited with error: %w", err)
-			}
+		case <-p.waitErr:
 		case <-time.After(5 * time.Second):
-			p.logger.Warn("opencode acp did not exit within 5s; killing")
+			p.logger.Warn("opencode acp did not exit within 5s; killing process group")
 
-			_ = p.cmd.Process.Kill()
+			if killErr := killProcessTree(p.cmd); killErr != nil {
+				p.logger.Warn("killProcessTree", slog.Any("error", killErr))
+			}
 
 			select {
 			case <-p.waitErr:
@@ -177,6 +227,8 @@ func (p *Process) Close() error {
 				p.closeErr = errors.New("opencode acp did not exit after SIGKILL")
 			}
 		}
+
+		close(p.closed)
 	})
 
 	return p.closeErr
@@ -231,14 +283,22 @@ func drainStderr(r io.ReadCloser, logger *slog.Logger, cb func(string)) {
 	}
 }
 
-// isExpectedExitErr reports whether err represents a normal termination
-// (e.g. we closed stdin and the process exited cleanly, or we sent
-// SIGKILL and it died). We only want to surface unexpected failures.
-func isExpectedExitErr(err error) bool {
+// isNormalTermination reports whether err represents an exit we should
+// not treat as a crash: cleanly closed (nil), or signal-terminated via
+// our Close path (SIGKILL / SIGTERM).
+func isNormalTermination(err error) bool {
+	if err == nil {
+		return true
+	}
+
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {
 		return false
 	}
-	// Signals or non-zero exits after intentional shutdown.
-	return true
+
+	if exitErr.ProcessState == nil {
+		return false
+	}
+
+	return exitErr.ProcessState.Success() //nolint:staticcheck // prefer explicit selector over embedded method
 }

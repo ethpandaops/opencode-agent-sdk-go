@@ -14,9 +14,15 @@ run `opencode auth login` out of band.
 | --- | --- |
 | `quick_start` | Spawn opencode, create a session, prompt it, stream the response. |
 | `sdk_tools` | Register an in-process Go function as a tool via `WithSDKTools`; the SDK serves it to opencode through a loopback HTTP MCP bridge. |
+| `external_mcp` | Attach an external stdio MCP server via `WithMCPServers`. Defaults to `npx -y @modelcontextprotocol/server-everything`; override with `EXTERNAL_MCP_COMMAND`. |
 | `session_list` | Enumerate prior sessions scoped to the working directory. |
 | `permission_callback` | Interactively approve/deny tool calls via stdin. Requires `"permission": {"edit": "ask"}` in `~/.config/opencode/config.json` to actually trigger prompts — the default `build` agent auto-allows everything. |
 | `fs_intercept` | Override `fs/write_text_file` delegations with `WithOnFsWrite` to capture writes in memory instead of hitting disk. Same permission prerequisite as above. |
+| `plan_mode` | Select opencode's `plan` agent via `WithAgent("plan")` so `session/request_permission` actually fires; pairs with an auto-approving callback. |
+
+For one-shot interactions, [`opencodesdk.Query`](../query.go) and
+[`opencodesdk.WithClient`](../with_client.go) wrap the lifecycle shown
+above into a single call — see the root README for the shorter form.
 
 ## Tips
 

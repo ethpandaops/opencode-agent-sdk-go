@@ -39,6 +39,18 @@ go get github.com/ethpandaops/opencode-agent-sdk-go
 
 ## Quick start
 
+One-shot via `Query`:
+
+```go
+res, err := opencodesdk.Query(ctx, "Say hello in three words.", opencodesdk.WithCwd(cwd))
+if err != nil {
+    panic(err)
+}
+fmt.Println(res.AssistantText)
+```
+
+Long-lived client with streaming:
+
 ```go
 package main
 
@@ -55,39 +67,35 @@ import (
 func main() {
     cwd, _ := os.Getwd()
 
-    c, err := opencodesdk.NewClient(opencodesdk.WithCwd(cwd))
-    if err != nil {
-        panic(err)
-    }
-    defer c.Close()
-
     ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
     defer cancel()
 
-    if err := c.Start(ctx); err != nil {
-        panic(err)
-    }
-
-    sess, err := c.NewSession(ctx)
-    if err != nil {
-        panic(err)
-    }
-
-    // Drain streaming updates in a goroutine.
-    go func() {
-        for n := range sess.Updates() {
-            if n.Update.AgentMessageChunk != nil && n.Update.AgentMessageChunk.Content.Text != nil {
-                fmt.Print(n.Update.AgentMessageChunk.Content.Text.Text)
-            }
+    err := opencodesdk.WithClient(ctx, func(c opencodesdk.Client) error {
+        sess, err := c.NewSession(ctx)
+        if err != nil {
+            return err
         }
-    }()
 
-    res, err := sess.Prompt(ctx, acp.TextBlock("Say hello in three words."))
+        go func() {
+            for n := range sess.Updates() {
+                if n.Update.AgentMessageChunk != nil && n.Update.AgentMessageChunk.Content.Text != nil {
+                    fmt.Print(n.Update.AgentMessageChunk.Content.Text.Text)
+                }
+            }
+        }()
+
+        res, err := sess.Prompt(ctx, acp.TextBlock("Say hello in three words."))
+        if err != nil {
+            return err
+        }
+
+        fmt.Printf("\nstop: %s\n", res.StopReason)
+        return nil
+    }, opencodesdk.WithCwd(cwd))
+
     if err != nil {
         panic(err)
     }
-
-    fmt.Printf("\nstop: %s\n", res.StopReason)
 }
 ```
 
@@ -143,20 +151,24 @@ program versus shelling out.
 | `WithSDKTools(tools...)` | in-process tools via the bridge |
 | `WithCanUseTool(cb)` | permission-prompt callback |
 | `WithOnFsWrite(cb)` | intercept `fs/write_text_file` |
+| `WithStrictCwdBoundary(bool)` | reject writes outside cwd |
 | `WithUpdatesBuffer(n)` | per-session update channel size |
 | `WithTerminalAuthCapability(bool)` | opt into opencode's `terminal-auth` launch hints |
+| `WithAutoLaunchLogin(bool)` | auto-spawn `opencode auth login` on `authRequired` |
 | `WithMeterProvider(mp)` | OTel MeterProvider |
 | `WithTracerProvider(tp)` | OTel TracerProvider |
 
 ## Examples
 
-See [`examples/`](./examples/) for five working programs:
+See [`examples/`](./examples/) for seven working programs:
 
 - `quick_start` — minimal round-trip
 - `sdk_tools` — in-process tool via the bridge
+- `external_mcp` — attach an external stdio MCP server via `WithMCPServers`
 - `session_list` — list prior sessions with pagination
 - `permission_callback` — interactive permission UX
 - `fs_intercept` — capture writes in memory instead of on disk
+- `plan_mode` — `WithAgent("plan")` to trigger permission prompts out of the box
 
 ## Architecture
 
@@ -177,9 +189,7 @@ your Go app ─(WithSDKTools)→ loopback HTTP MCP bridge ─←─ opencode
 ```
 
 The SDK is deliberately a thin opinionated wrapper — we do not
-reimplement the ACP types or the JSON-RPC transport. See
-[`INIT.md`](./INIT.md) for the migration log and the live-probed
-protocol reference used to design this.
+reimplement the ACP types or the JSON-RPC transport.
 
 ## License
 

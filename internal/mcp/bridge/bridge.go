@@ -25,6 +25,14 @@ import (
 // arguments as a map and returns a structured ToolOutput or an error.
 type HandlerFunc func(ctx context.Context, input map[string]any) (*ToolOutput, error)
 
+// InvocationRecorder receives a single observation for each tool call
+// routed through the bridge. status is one of "ok", "error",
+// "app_error" (the tool returned IsError=true). Callers can implement
+// this with observability.Observer.RecordMCPBridge.
+type InvocationRecorder interface {
+	RecordMCPBridge(ctx context.Context, tool, status string)
+}
+
 // ToolOutput carries the bridge-friendly form of a tool's result. It
 // decouples the bridge from opencodesdk's public Tool API so the
 // bridge package has no cyclic dependencies.
@@ -53,11 +61,13 @@ type Bridge struct {
 	token      string
 	started    bool
 	closed     bool
+	recorder   InvocationRecorder
 }
 
 // New constructs a bridge configured with the supplied tools. The
-// bridge is not listening until Start is called.
-func New(tools []ToolDef, logger *slog.Logger) (*Bridge, error) {
+// bridge is not listening until Start is called. If recorder is non-nil
+// it is invoked once per tool call with (tool, status).
+func New(tools []ToolDef, logger *slog.Logger, recorder InvocationRecorder) (*Bridge, error) {
 	if logger == nil {
 		return nil, errors.New("bridge: logger is required")
 	}
@@ -73,14 +83,18 @@ func New(tools []ToolDef, logger *slog.Logger) (*Bridge, error) {
 	}, nil)
 
 	for _, t := range tools {
-		addTool(server, t)
+		addTool(server, t, recorder)
 	}
 
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
 	}, nil)
 
-	b := &Bridge{logger: logger.With(slog.String("component", "mcp-bridge")), token: token}
+	b := &Bridge{
+		logger:   logger.With(slog.String("component", "mcp-bridge")),
+		token:    token,
+		recorder: recorder,
+	}
 
 	// Bearer-auth middleware. opencode passes our token in the
 	// Authorization header per the mcpServers entry we build below.
@@ -171,16 +185,23 @@ func (b *Bridge) Token() string {
 
 // addTool registers a single ToolDef on the MCP server, wiring it up
 // to invoke the caller-supplied HandlerFunc.
-func addTool(server *mcp.Server, def ToolDef) {
+func addTool(server *mcp.Server, def ToolDef, recorder InvocationRecorder) {
 	tool := &mcp.Tool{
 		Name:        def.Name,
 		Description: def.Description,
 		InputSchema: def.Schema,
 	}
 
+	record := func(ctx context.Context, status string) {
+		if recorder != nil {
+			recorder.RecordMCPBridge(ctx, def.Name, status)
+		}
+	}
+
 	server.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		input, err := coerceArguments(req.Params.Arguments)
 		if err != nil {
+			record(ctx, "error")
 			//nolint:nilerr // application-level error surfaced via IsError
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
@@ -190,6 +211,7 @@ func addTool(server *mcp.Server, def ToolDef) {
 
 		out, err := def.Handler(ctx, input)
 		if err != nil {
+			record(ctx, "error")
 			//nolint:nilerr // application-level error surfaced via IsError
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
@@ -198,6 +220,8 @@ func addTool(server *mcp.Server, def ToolDef) {
 		}
 
 		if out == nil {
+			record(ctx, "ok")
+
 			return &mcp.CallToolResult{}, nil
 		}
 
@@ -209,6 +233,12 @@ func addTool(server *mcp.Server, def ToolDef) {
 
 		if out.Structured != nil {
 			result.StructuredContent = out.Structured
+		}
+
+		if out.IsError {
+			record(ctx, "app_error")
+		} else {
+			record(ctx, "ok")
 		}
 
 		return result, nil

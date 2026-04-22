@@ -4,8 +4,8 @@ package opencodesdk
 const Version = "0.0.0-dev"
 
 // MinimumCLIVersion is the minimum required opencode CLI version. The
-// SDK checks opencode's advertised `agentInfo.version` against this value
-// during the ACP initialize handshake and fails fast on a mismatch unless
+// SDK probes `opencode --version` while resolving the binary in
+// Client.Start and fails fast with ErrUnsupportedCLIVersion unless
 // WithSkipVersionCheck(true) is set.
 const MinimumCLIVersion = "1.14.20"
 

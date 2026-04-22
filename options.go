@@ -48,6 +48,10 @@ type options struct {
 
 	// Auth
 	terminalAuthCapability bool
+	autoLaunchLogin        bool
+
+	// Filesystem safety
+	strictCwdBoundary bool
 
 	// In-process tools served via the loopback MCP bridge.
 	sdkTools []Tool
@@ -197,4 +201,29 @@ func WithTracerProvider(tp trace.TracerProvider) Option {
 // This is a no-op for agents that don't honor the capability. Default: false.
 func WithTerminalAuthCapability(enabled bool) Option {
 	return func(o *options) { o.terminalAuthCapability = enabled }
+}
+
+// WithAutoLaunchLogin enables automatic relaunch of the terminal-auth
+// command when opencode reports authRequired (-32000). The SDK spawns
+// the command parsed from the auth method's _meta["terminal-auth"]
+// block with stdio inherited from the parent process, waits for it to
+// exit, then retries the failing session/new or session/load once.
+//
+// Requires WithTerminalAuthCapability(true) so opencode actually
+// advertises launch instructions. Default: false.
+func WithAutoLaunchLogin(enabled bool) Option {
+	return func(o *options) {
+		o.autoLaunchLogin = enabled
+		if enabled {
+			o.terminalAuthCapability = true
+		}
+	}
+}
+
+// WithStrictCwdBoundary rejects fs/write_text_file delegations for
+// paths outside the configured cwd. When enabled without a configured
+// cwd, every write is rejected. Default: false (writes are allowed
+// anywhere the process has filesystem access to).
+func WithStrictCwdBoundary(enabled bool) Option {
+	return func(o *options) { o.strictCwdBoundary = enabled }
 }

@@ -11,27 +11,32 @@
 
 ## Status
 
-Under active migration on branch `feat/baseline`. Read `INIT.md` at the
-repo root for the complete plan, milestone list, and protocol reference.
+Stable public API. Opencode-focused Go SDK built on
+`github.com/coder/acp-go-sdk`.
 
-## What This SDK Exposes (target)
+## What This SDK Exposes
 
-- One-shot query API: `Query(ctx, prompt, opts...)`
-- Streaming input query API: `QueryStream(ctx, messages, opts...)`
-- Stateful client API: `NewClient(opts...) (Client, error)` + `Session`
+- One-shot: `Query(ctx, prompt, opts...) (*QueryResult, error)`
+- Multi-prompt iterator: `QueryStream(ctx, prompts, opts...)`
+- Stateful client: `NewClient(opts...) (Client, error)` + `Session`
 - Lifecycle helper: `WithClient(ctx, fn, opts...) error`
-- Session enumeration: `Client.ListSessions(ctx, opts...)`
-- opencode unstable wrappers: `Client.ForkSession`, `Client.ResumeSession`, `Session.SetModel`
+- Session enumeration: `Client.ListSessions(ctx, cursor)`
+- opencode unstable: `Client.ForkSession`, `Client.ResumeSession`,
+  `Client.UnstableSetModel`, `Session.CurrentVariant`
 
-## Primary Public Surface Areas (target layout)
+## Primary Public Surface
 
 - `options.go`: all `WithXxx(...)` constructors
-- `client.go`: `Client` and `Session` interfaces
-- `query.go`: top-level `Query` / `QueryStream`
+- `client.go` + `client_impl.go`: `Client` interface + implementation
+- `session.go` + `session_impl.go`: `Session` interface + implementation
+- `query.go`: top-level `Query` / `QueryStream` + `QueryResult`
 - `with_client.go`: lifecycle helper
 - `mcp.go`: `Tool` interface + `NewTool` + `WithSDKTools`
-- `types.go`: re-exported ACP message/content/config types
-- `errors.go`: typed and sentinel errors (incl. `ErrAuthRequired`, `ErrCancelled`)
+- `unstable.go`: opencode-specific RPC wrappers + `OpencodeVariant`
+- `permissions.go`: `PermissionCallback`, helpers (`AllowOnce` etc.)
+- `auth.go`: `TerminalAuthInstructions` + `TerminalAuthLaunch`
+- `errors.go`: typed and sentinel errors (incl. `ErrAuthRequired`,
+  `ErrCancelled`, `ErrCLINotFound`)
 
 ## Documentation Sync Expectations
 
@@ -40,4 +45,3 @@ When public APIs or options change, update in the same commit:
 - `README.md` (user-facing)
 - `doc.go` (package docs)
 - `CLAUDE.md` / `.claude/rules/*` if agent guidance changed
-- `INIT.md` if any locked decision changes

@@ -58,9 +58,27 @@ type Session interface {
 	InitialConfigOptions() []acp.SessionConfigOption
 
 	// Meta returns the raw _meta block from session creation. opencode
-	// exposes variant info as `_meta.opencode.variant` —
-	// a typed accessor lands in M7.
+	// exposes variant info as `_meta.opencode.variant`; use
+	// CurrentVariant for a typed accessor.
 	Meta() map[string]any
+
+	// AvailableModels returns the list of models advertised by opencode
+	// for this session. Derived from InitialModels; returns nil if the
+	// agent did not advertise any.
+	AvailableModels() []acp.ModelInfo
+
+	// AvailableCommands returns a snapshot of the slash commands the
+	// agent currently advertises. opencode emits these once per session,
+	// ~1 tick after the lifecycle response, so this accessor may be
+	// empty immediately after NewSession and populated shortly after.
+	// Callers that need the up-to-the-moment list should observe the
+	// Updates() channel for acp.AvailableCommandsUpdate notifications.
+	AvailableCommands() []acp.AvailableCommand
+
+	// CurrentVariant returns the opencode-specific model-variant state
+	// parsed from the session's _meta.opencode block, or nil if the
+	// session did not advertise a variant.
+	CurrentVariant() *VariantInfo
 }
 
 // PromptResult is the final outcome of Session.Prompt.

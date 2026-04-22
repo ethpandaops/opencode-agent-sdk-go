@@ -7,11 +7,8 @@ import (
 	"github.com/coder/acp-go-sdk"
 )
 
-// ACP JSON-RPC error codes we inspect. See INIT.md Part 1 "Error codes".
+// ACP JSON-RPC error codes we inspect.
 const (
-	codeMethodNotFound   = -32601
-	codeInvalidParams    = -32602
-	codeInternalError    = -32603
 	codeAuthRequired     = -32000
 	codeRequestCancelled = -32800
 )
