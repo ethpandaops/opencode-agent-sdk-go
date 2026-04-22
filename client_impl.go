@@ -469,7 +469,12 @@ func (c *client) applySessionConfig(ctx context.Context, s *session, o *options)
 func (c *client) mergeOptions(override []Option) *options {
 	merged := *c.opts
 
-	merged.mcpServers = append([]acp.McpServer(nil), c.opts.mcpServers...)
+	// mcpServers must be a non-nil slice: opencode 1.14.20 rejects
+	// session/new when the JSON payload serializes the field as null
+	// (error -32602 "Invalid params"; zod: "expected array, received
+	// null"). Starting from an empty slice also ensures the bridge
+	// prepend path always sees a slice it can extend.
+	merged.mcpServers = append([]acp.McpServer{}, c.opts.mcpServers...)
 	merged.cliFlags = append([]string(nil), c.opts.cliFlags...)
 	merged.sdkTools = append([]Tool(nil), c.opts.sdkTools...)
 

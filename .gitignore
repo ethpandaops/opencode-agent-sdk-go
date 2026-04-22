@@ -29,6 +29,9 @@ go.work.sum
 *.swo
 *~
 
+# Claude Code runtime state
+.claude/scheduled_tasks.lock
+
 # OS specific files
 .DS_Store
 Thumbs.db
