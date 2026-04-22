@@ -1,0 +1,83 @@
+package opencodesdk
+
+import (
+	"context"
+
+	"github.com/coder/acp-go-sdk"
+)
+
+// Session is a stateful opencode conversation. Obtain one via
+// Client.NewSession, Client.LoadSession, or (in M7) Client.ForkSession /
+// Client.ResumeSession.
+//
+// Session is safe for concurrent Prompt/Cancel calls from different
+// goroutines, but a single in-flight Prompt serializes all tool calls
+// and updates on the session.
+type Session interface {
+	// ID returns the opencode session ID (e.g. "ses_24d2fc1e0ffe5YxDJSq64vW9LD").
+	ID() string
+
+	// Prompt submits a user turn and blocks until the turn completes.
+	// It returns the final PromptResult (stop reason + optional usage)
+	// or an error. Cancel the ctx to abort the turn; the error returned
+	// in that case wraps ErrCancelled.
+	Prompt(ctx context.Context, blocks ...acp.ContentBlock) (*PromptResult, error)
+
+	// Cancel sends a session/cancel notification for the current turn.
+	// This is advisory — the turn's pending Prompt call returns with
+	// an error. Cancel is safe to call when no turn is in flight; it
+	// becomes a no-op.
+	Cancel(ctx context.Context) error
+
+	// Updates returns a channel that delivers every session/update
+	// notification for this session. The channel is buffered
+	// (WithUpdatesBuffer, default 128). If the buffer fills, excess
+	// notifications are dropped and logged at warn level.
+	//
+	// The channel remains open for the lifetime of the session and is
+	// closed when the owning Client is closed.
+	Updates() <-chan acp.SessionNotification
+
+	// SetModel changes the model used for subsequent prompts.
+	SetModel(ctx context.Context, modelID string) error
+
+	// SetMode changes the agent ("mode") used for subsequent prompts.
+	SetMode(ctx context.Context, modeID string) error
+
+	// InitialModels returns the SessionModelState reported by opencode
+	// at session creation (or the last loadSession/resume). May be nil
+	// if the agent did not advertise model state.
+	InitialModels() *acp.SessionModelState
+
+	// InitialModes returns the SessionModeState reported at creation.
+	// May be nil.
+	InitialModes() *acp.SessionModeState
+
+	// InitialConfigOptions returns the configOptions snapshot from
+	// session creation.
+	InitialConfigOptions() []acp.SessionConfigOption
+
+	// Meta returns the raw _meta block from session creation. opencode
+	// exposes variant info as `_meta.opencode.variant` —
+	// a typed accessor lands in M7.
+	Meta() map[string]any
+}
+
+// PromptResult is the final outcome of Session.Prompt.
+type PromptResult struct {
+	// StopReason is the reason the agent stopped producing output for
+	// this turn. opencode currently only returns "end_turn" on success;
+	// cancel paths surface as ErrCancelled.
+	StopReason acp.StopReason
+
+	// Usage is the token accounting for this turn. The field is marked
+	// unstable in ACP and may be absent for some agents; opencode
+	// populates it reliably.
+	Usage *acp.Usage
+
+	// Meta is the _meta block from the PromptResponse. Typically nil.
+	Meta map[string]any
+}
+
+// SessionInfo is a lightweight handle returned by Client.ListSessions.
+type SessionInfo = acp.SessionInfo

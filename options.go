@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"maps"
 	"time"
+
+	"github.com/coder/acp-go-sdk"
 )
 
 // Option configures a Client or a one-shot Query. Options are applied
@@ -28,6 +30,15 @@ type options struct {
 
 	// Handshake
 	initializeTimeout time.Duration
+
+	// Session defaults applied by Client.NewSession / LoadSession /
+	// each session created via this Client.
+	model      string
+	agent      string
+	mcpServers []acp.McpServer
+
+	// Per-session buffering for the updates channel. Zero → default (128).
+	updatesBuffer int
 }
 
 // defaultOptions returns the zero-value options with safe defaults.
@@ -108,4 +119,41 @@ func WithInitializeTimeout(d time.Duration) Option {
 // Start. Useful for local development against unreleased opencode builds.
 func WithSkipVersionCheck(skip bool) Option {
 	return func(o *options) { o.skipVersionCheck = skip }
+}
+
+// WithModel selects the model used by new sessions. The value must
+// match one of the options exposed by opencode in the session/new
+// configOptions (e.g. "anthropic/claude-sonnet-4-6" or
+// "anthropic/claude-sonnet-4/high"). Applied via session/set_config_option
+// immediately after session/new.
+func WithModel(id string) Option {
+	return func(o *options) { o.model = id }
+}
+
+// WithAgent selects the opencode agent (a.k.a. session mode) used by
+// new sessions. Valid values map to opencode's agent names — typical
+// defaults are "build", "plan", "general", "explore", "summarize".
+// Applied via session/set_config_option immediately after session/new.
+//
+// Use "plan" to see session/request_permission prompts for edits; the
+// default "build" agent auto-allows all tool calls.
+func WithAgent(agent string) Option {
+	return func(o *options) { o.agent = agent }
+}
+
+// WithMCPServers declares external MCP servers to attach to every new
+// session. To expose in-process Go tools to the agent, use WithSDKTools
+// (which lands in M6).
+func WithMCPServers(servers ...acp.McpServer) Option {
+	return func(o *options) {
+		o.mcpServers = append(o.mcpServers, servers...)
+	}
+}
+
+// WithUpdatesBuffer sets the buffer size of each Session.Updates()
+// channel. If notifications arrive faster than the consumer drains,
+// updates beyond this buffer are dropped and logged as a warning.
+// Default: 128.
+func WithUpdatesBuffer(n int) Option {
+	return func(o *options) { o.updatesBuffer = n }
 }
