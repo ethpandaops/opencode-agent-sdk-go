@@ -26,6 +26,7 @@ type Observer struct {
 	promptDuration     metric.Float64Histogram
 	promptTokens       metric.Float64Histogram
 	sessionUpdate      metric.Int64Counter
+	sessionDropped     metric.Int64Counter
 	mcpBridge          metric.Int64Counter
 	permissionReq      metric.Int64Counter
 	fsDelegated        metric.Int64Counter
@@ -67,6 +68,11 @@ func NewObserver(mp metric.MeterProvider, tp trace.TracerProvider) *Observer {
 	sessionUpdate, _ := meter.Int64Counter(
 		Namespace+".session.update.count",
 		metric.WithDescription("session/update notifications received, by variant"),
+	)
+
+	sessionDropped, _ := meter.Int64Counter(
+		Namespace+".session.updates.dropped",
+		metric.WithDescription("session/update notifications dropped because the updates buffer was full"),
 	)
 
 	mcpBridge, _ := meter.Int64Counter(
@@ -117,6 +123,7 @@ func NewObserver(mp metric.MeterProvider, tp trace.TracerProvider) *Observer {
 		promptDuration:     promptDuration,
 		promptTokens:       promptTokens,
 		sessionUpdate:      sessionUpdate,
+		sessionDropped:     sessionDropped,
 		mcpBridge:          mcpBridge,
 		permissionReq:      permissionReq,
 		fsDelegated:        fsDelegated,
@@ -224,6 +231,13 @@ func (o *Observer) RecordPrompt(ctx context.Context, duration time.Duration, sto
 // given variant (e.g. "agent_message_chunk", "tool_call", "usage_update").
 func (o *Observer) RecordSessionUpdate(ctx context.Context, variant string) {
 	o.sessionUpdate.Add(ctx, 1, metric.WithAttributes(attribute.String("variant", variant)))
+}
+
+// RecordUpdateDropped increments the counter for a session/update
+// notification that was discarded because the per-session updates
+// buffer was full.
+func (o *Observer) RecordUpdateDropped(ctx context.Context, sessionID string) {
+	o.sessionDropped.Add(ctx, 1, metric.WithAttributes(attribute.String("session_id", sessionID)))
 }
 
 // RecordMCPBridge increments the bridge counter for one inbound tool

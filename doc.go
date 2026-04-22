@@ -12,6 +12,21 @@
 //     (Client.ForkSession, Client.ResumeSession,
 //     Client.UnstableSetModel) and the _meta.opencode.variant channel
 //     (OpencodeVariant).
+//   - typed session/update subscribers via Session.Subscribe and
+//     [UpdateHandlers] for AgentMessage, Plan, ToolCall, Mode, etc.,
+//     so callers can register per-variant callbacks instead of
+//     draining Session.Updates() with a switch.
+//   - a turn-complete hook (WithOnTurnComplete) and an
+//     overflow-observation hook (WithOnUpdateDropped, plus
+//     Session.DroppedUpdates()) for cross-cutting observability.
+//   - a cursor-paginated session iterator ([Client.IterSessions])
+//     over opencode's session/list RPC.
+//   - a raw extension-method escape hatch
+//     ([Client.CallExtension]) for ACP `_`-prefixed methods the SDK
+//     does not yet expose as typed wrappers.
+//   - prompt-capability preflight: Session.Prompt rejects content
+//     blocks the agent did not advertise support for with
+//     [ErrCapabilityUnavailable].
 //   - permission and filesystem callbacks surfaced via WithCanUseTool
 //     and WithOnFsWrite, plus cwd-scoped write enforcement
 //     (WithStrictCwdBoundary).

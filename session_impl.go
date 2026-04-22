@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -44,6 +45,17 @@ type session struct {
 	// toolCallStart tracks the start time of each in-flight tool call
 	// so RecordToolCall can emit a duration on the terminal update.
 	toolCallStart map[acp.ToolCallId]toolCallObservation
+
+	// subscribers is the registered set of typed UpdateHandlers. Keyed
+	// by an opaque subscription id so Subscribe can return an
+	// unsubscribe closure that removes exactly its own entry. Protected
+	// by mu.
+	subscribers map[uint64]UpdateHandlers
+	subSeq      uint64
+
+	// dropped counts session/update notifications that were discarded
+	// because the updates channel was full. Exposed via DroppedUpdates.
+	dropped atomic.Int64
 }
 
 type toolCallObservation struct {
@@ -70,6 +82,7 @@ func newSession(c *client, id acp.SessionId, models *acp.SessionModelState, mode
 		initialOptions: opts,
 		meta:           meta,
 		toolCallStart:  make(map[acp.ToolCallId]toolCallObservation),
+		subscribers:    make(map[uint64]UpdateHandlers, 1),
 	}
 
 	if models != nil {
@@ -147,13 +160,16 @@ func (s *session) CurrentVariant() *VariantInfo {
 
 // deliver pushes a notification into this session's updates channel.
 // Called from the dispatcher goroutine. Non-blocking: if the buffer is
-// full the notification is dropped and a warning is logged.
+// full the notification is dropped, a warning is logged, the drop
+// counter bumps, and any WithOnUpdateDropped callback fires.
 //
 // Notifications that carry state we cache on the session (e.g.
 // available_commands_update) or observability signals (tool_call and
 // usage_update) are captured here before the update is forwarded, so
 // that AvailableCommands() and OTel metrics reflect them even if no
-// consumer ever drains Updates().
+// consumer ever drains Updates(). Typed subscribers installed via
+// Subscribe also fire here, before the notification reaches the
+// updates channel.
 func (s *session) deliver(n acp.SessionNotification) {
 	s.mu.Lock()
 
@@ -165,14 +181,87 @@ func (s *session) deliver(n acp.SessionNotification) {
 
 	s.observeInLock(n)
 
+	subs := make([]UpdateHandlers, 0, len(s.subscribers))
+	for _, h := range s.subscribers {
+		subs = append(subs, h)
+	}
+
 	s.mu.Unlock()
+
+	dispatchSubscribers(context.Background(), subs, n)
 
 	select {
 	case s.updates <- n:
 	default:
+		count := s.dropped.Add(1)
+		s.client.observer.RecordUpdateDropped(context.Background(), string(s.id))
 		s.logger.Warn("session updates channel full; dropping notification",
 			slog.Int("buffer", cap(s.updates)),
+			slog.Int64("dropped_total", count),
 		)
+
+		if cb := s.client.opts.onUpdateDropped; cb != nil {
+			cb(context.Background(), string(s.id), count)
+		}
+	}
+}
+
+// Subscribe registers a set of typed UpdateHandlers with the session.
+// Returns an unsubscribe function that removes the registration. Safe
+// to call concurrently.
+func (s *session) Subscribe(h UpdateHandlers) func() {
+	s.mu.Lock()
+	s.subSeq++
+	id := s.subSeq
+	s.subscribers[id] = h
+	s.mu.Unlock()
+
+	return func() {
+		s.mu.Lock()
+		delete(s.subscribers, id)
+		s.mu.Unlock()
+	}
+}
+
+// DroppedUpdates returns the cumulative session/update drop count.
+func (s *session) DroppedUpdates() int64 { return s.dropped.Load() }
+
+// dispatchSubscribers invokes each installed handler for the notification
+// variant present in n. Handlers run sequentially; a nil field is a
+// no-op. Panics inside handlers propagate to the dispatcher goroutine —
+// it is the caller's responsibility to keep handlers non-panicking.
+func dispatchSubscribers(ctx context.Context, subs []UpdateHandlers, n acp.SessionNotification) {
+	if len(subs) == 0 {
+		return
+	}
+
+	u := n.Update
+
+	for _, h := range subs {
+		switch {
+		case u.UserMessageChunk != nil && h.UserMessage != nil:
+			h.UserMessage(ctx, u.UserMessageChunk)
+		case u.AgentMessageChunk != nil && h.AgentMessage != nil:
+			h.AgentMessage(ctx, u.AgentMessageChunk)
+		case u.AgentThoughtChunk != nil && h.AgentThought != nil:
+			h.AgentThought(ctx, u.AgentThoughtChunk)
+		case u.ToolCall != nil && h.ToolCall != nil:
+			h.ToolCall(ctx, u.ToolCall)
+		case u.ToolCallUpdate != nil && h.ToolCallUpdate != nil:
+			h.ToolCallUpdate(ctx, u.ToolCallUpdate)
+		case u.Plan != nil && h.Plan != nil:
+			h.Plan(ctx, u.Plan)
+		case u.AvailableCommandsUpdate != nil && h.AvailableCommands != nil:
+			h.AvailableCommands(ctx, u.AvailableCommandsUpdate)
+		case u.CurrentModeUpdate != nil && h.CurrentMode != nil:
+			h.CurrentMode(ctx, u.CurrentModeUpdate)
+		case u.ConfigOptionUpdate != nil && h.ConfigOption != nil:
+			h.ConfigOption(ctx, u.ConfigOptionUpdate)
+		case u.SessionInfoUpdate != nil && h.SessionInfo != nil:
+			h.SessionInfo(ctx, u.SessionInfoUpdate)
+		case u.UsageUpdate != nil && h.Usage != nil:
+			h.Usage(ctx, u.UsageUpdate)
+		}
 	}
 }
 
@@ -273,6 +362,10 @@ func (s *session) Prompt(ctx context.Context, blocks ...acp.ContentBlock) (*Prom
 		return nil, errors.New("opencodesdk: Prompt requires at least one content block")
 	}
 
+	if err := s.client.checkPromptCapabilities(blocks); err != nil {
+		return nil, err
+	}
+
 	// Reset cancelIntended at entry: a stray Cancel() call before any
 	// Prompt runs would otherwise leave the flag sticky and misclassify
 	// the next unrelated error as ErrCancelled.
@@ -324,20 +417,41 @@ func (s *session) Prompt(ctx context.Context, blocks ...acp.ContentBlock) (*Prom
 		s.cancelIntended = false
 		s.mu.Unlock()
 
+		var promptErr error
 		if intended || errors.Is(err, context.Canceled) {
-			return nil, fmt.Errorf("%w: %w", ErrCancelled, err)
+			promptErr = fmt.Errorf("%w: %w", ErrCancelled, err)
+		} else {
+			promptErr = wrapACPErr(err)
 		}
 
-		return nil, wrapACPErr(err)
+		s.fireTurnComplete(ctx, nil, promptErr)
+
+		return nil, promptErr
 	}
 
 	s.client.observer.RecordPrompt(ctx, time.Since(started), string(resp.StopReason), tokensFromUsage(resp.Usage), labels)
 
-	return &PromptResult{
+	result := &PromptResult{
 		StopReason: resp.StopReason,
 		Usage:      resp.Usage,
 		Meta:       resp.Meta,
-	}, nil
+	}
+
+	s.fireTurnComplete(ctx, result, nil)
+
+	return result, nil
+}
+
+// fireTurnComplete invokes the client's WithOnTurnComplete callback, if
+// any. Split out so both success and error paths can call it without
+// duplicating the nil-check.
+func (s *session) fireTurnComplete(ctx context.Context, result *PromptResult, err error) {
+	cb := s.client.opts.onTurnComplete
+	if cb == nil {
+		return
+	}
+
+	cb(ctx, string(s.id), result, err)
 }
 
 // tokensFromUsage extracts the Observer's TokenCounts from an

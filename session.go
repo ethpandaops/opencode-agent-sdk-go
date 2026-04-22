@@ -79,6 +79,18 @@ type Session interface {
 	// parsed from the session's _meta.opencode block, or nil if the
 	// session did not advertise a variant.
 	CurrentVariant() *VariantInfo
+
+	// Subscribe installs a set of typed session/update callbacks and
+	// returns an unsubscribe function. Handlers fire synchronously in
+	// the SDK's dispatcher goroutine alongside delivery to Updates(),
+	// so they must not block. Multiple subscribers are supported and
+	// fire in registration order.
+	Subscribe(handlers UpdateHandlers) (unsubscribe func())
+
+	// DroppedUpdates returns the cumulative count of session/update
+	// notifications dropped because the Updates() buffer was full since
+	// the session was created.
+	DroppedUpdates() int64
 }
 
 // PromptResult is the final outcome of Session.Prompt.

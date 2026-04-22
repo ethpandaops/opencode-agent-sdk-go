@@ -53,6 +53,8 @@ func (f *fakeSession) Meta() map[string]any                            { return 
 func (f *fakeSession) AvailableModels() []acp.ModelInfo                { return nil }
 func (f *fakeSession) AvailableCommands() []acp.AvailableCommand       { return nil }
 func (f *fakeSession) CurrentVariant() *VariantInfo                    { return nil }
+func (f *fakeSession) Subscribe(_ UpdateHandlers) func()               { return func() {} }
+func (f *fakeSession) DroppedUpdates() int64                           { return 0 }
 
 func newFakeSession(buf int) *fakeSession {
 	return &fakeSession{

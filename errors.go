@@ -36,6 +36,23 @@ var (
 
 	// ErrClientNotStarted is returned by Client methods called before Start.
 	ErrClientNotStarted = errors.New("client has not been started")
+
+	// ErrCapabilityUnavailable is returned when Session.Prompt is called
+	// with a content block (image, audio, embedded resource) that the
+	// agent did not advertise support for in its PromptCapabilities.
+	ErrCapabilityUnavailable = errors.New("agent does not advertise required prompt capability")
+
+	// ErrUpdateQueueOverflow is recorded when a session/update
+	// notification is dropped because the Session.Updates() buffer was
+	// full. It is not returned directly — callers observe the condition
+	// via Session.DroppedUpdates or the `opencodesdk.session.updates.dropped`
+	// metric.
+	ErrUpdateQueueOverflow = errors.New("session updates buffer overflowed; notifications were dropped")
+
+	// ErrExtensionMethodRequired is returned by Client.CallExtension
+	// when the supplied method name does not begin with an underscore.
+	// The ACP spec reserves `_`-prefixed methods for extensions.
+	ErrExtensionMethodRequired = errors.New("extension method names must begin with \"_\"")
 )
 
 // RequestError is the typed JSON-RPC error surface exposed to callers. It

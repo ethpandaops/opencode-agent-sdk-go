@@ -13,10 +13,20 @@ for the protocol layer. This package adds:
 - typed wrappers for opencode's unstable session RPCs
   (`ForkSession`, `ResumeSession`, `UnstableSetModel`) and the
   `_meta.opencode.variant` model-variant channel
+- typed `session/update` subscribers (`Session.Subscribe` +
+  `UpdateHandlers`) for AgentMessage, Plan, ToolCall, Mode, Usage, etc.
+- turn-complete and updates-dropped hooks
+  (`WithOnTurnComplete`, `WithOnUpdateDropped`)
+- cursor-paginated session iterator (`Client.IterSessions`)
+- a raw extension-method escape hatch (`Client.CallExtension`) for
+  ACP `_`-prefixed methods the SDK doesn't wrap yet
 - `session/request_permission` and `fs/write_text_file` callbacks
 - **in-process Go tools** via a loopback HTTP MCP bridge
   (`WithSDKTools`) — no separate MCP server to run
 - opencode's `terminal-auth` auth-flow hint extraction
+- prompt-capability preflight (image/audio/embedded-resource blocks
+  are rejected locally with `ErrCapabilityUnavailable` when the agent
+  didn't advertise support)
 - OpenTelemetry metrics + spans under the `opencodesdk.*` namespace
 
 ## Status

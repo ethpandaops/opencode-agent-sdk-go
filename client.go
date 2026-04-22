@@ -2,6 +2,8 @@ package opencodesdk
 
 import (
 	"context"
+	"encoding/json"
+	"iter"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -65,6 +67,23 @@ type Client interface {
 	// UnstableSetModel issues opencode's unstable_setSessionModel RPC
 	// directly. Prefer Session.SetModel for normal use.
 	UnstableSetModel(ctx context.Context, sessionID, modelID string) error
+
+	// IterSessions returns an iterator over every session the agent
+	// exposes in the configured cwd, paginating transparently via the
+	// cursor opencode returns. The iterator short-circuits on the first
+	// error. Prefer this over hand-rolling a ListSessions loop.
+	IterSessions(ctx context.Context) iter.Seq2[SessionInfo, error]
+
+	// CallExtension issues a raw JSON-RPC call for an ACP extension
+	// method. The method name must begin with an underscore per the
+	// ACP spec's extension convention. Returns the raw JSON response
+	// from the agent.
+	//
+	// Prefer the typed wrappers (ForkSession, ResumeSession,
+	// UnstableSetModel, etc.) when they cover the RPC you need. Use
+	// this only for opencode- or agent-specific extensions that the
+	// SDK does not yet expose.
+	CallExtension(ctx context.Context, method string, params any) (json.RawMessage, error)
 }
 
 // NewClient creates a new, un-started Client configured with the given

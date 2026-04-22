@@ -43,8 +43,10 @@ type options struct {
 	updatesBuffer int
 
 	// Callbacks
-	canUseTool PermissionCallback
-	onFsWrite  FsWriteCallback
+	canUseTool      PermissionCallback
+	onFsWrite       FsWriteCallback
+	onTurnComplete  TurnCompleteCallback
+	onUpdateDropped UpdateDroppedCallback
 
 	// Auth
 	terminalAuthCapability bool
@@ -177,6 +179,29 @@ func WithMCPServers(servers ...acp.McpServer) Option {
 // Default: 128.
 func WithUpdatesBuffer(n int) Option {
 	return func(o *options) { o.updatesBuffer = n }
+}
+
+// WithOnTurnComplete registers a callback that fires after every
+// Session.Prompt completes, whether it succeeded or errored. Useful for
+// centralised logging, metrics, or pushing the final assistant message
+// into an external store without wrapping every call site.
+//
+// The callback runs synchronously after Prompt returns to its caller.
+// Long-running work should be dispatched off the callback goroutine.
+func WithOnTurnComplete(cb TurnCompleteCallback) Option {
+	return func(o *options) { o.onTurnComplete = cb }
+}
+
+// WithOnUpdateDropped registers a callback invoked whenever a
+// session/update notification is dropped because the Session.Updates()
+// buffer was full. The callback receives the session ID and the new
+// cumulative drop count.
+//
+// Use this to detect that the consumer of Updates() is falling behind
+// — consider increasing WithUpdatesBuffer or offloading the drain loop
+// to a goroutine.
+func WithOnUpdateDropped(cb UpdateDroppedCallback) Option {
+	return func(o *options) { o.onUpdateDropped = cb }
 }
 
 // WithMeterProvider sets the OTel MeterProvider for SDK metrics. When
