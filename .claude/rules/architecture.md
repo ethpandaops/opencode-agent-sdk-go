@@ -1,41 +1,42 @@
 # Architecture
 
-## Transport and Backend Model
+## Transport model
 
-The SDK supports two built-in execution backends:
+Single transport: `opencode acp` subprocess over stdio JSON-RPC. The
+protocol layer (JSON-RPC framing, schema types, request/response
+correlation, notification dispatch, generic cancellation) is provided
+by [`github.com/coder/acp-go-sdk`](https://github.com/coder/acp-go-sdk) —
+we do **not** reimplement it.
 
-1. `exec` backend (`codex exec`)
-2. `app-server` backend (`codex app-server`)
+## Backend routing
 
-## Backend Routing Rules
+None. opencode has one ACP mode. `Query(...)`, `QueryStream(...)`, and
+`NewClient(...)` all go through the same `opencode acp` subprocess.
 
-- `Query(...)` auto-selects backend from enabled options.
-  - Uses `exec` when all selected options are supported there.
-  - Routes to `app-server` when required by selected options.
-- `QueryStream(...)` uses app-server semantics unless `WithTransport(...)` injects custom transport.
-- `Client.Start(...)` uses app-server transport semantics.
+## High-level components (target layout)
 
-Capability selection/validation logic lives in:
+- `internal/subprocess/acp.go`: opencode subprocess lifecycle, stdio
+  wiring into coder/acp-go-sdk's `ClientSideConnection`
+- `internal/cli/`: binary discovery + version check
+- `internal/handlers/`: implementations of agent-initiated RPCs
+  (`session/request_permission`, `fs/write_text_file`)
+- `internal/mcp/bridge/`: loopback HTTP MCP server for `WithSDKTools`
+- `internal/unstable/`: typed wrappers for opencode's unstable methods
+  (`unstable_forkSession`, `unstable_resumeSession`, `unstable_setSessionModel`)
+  and `_meta.opencode.variant` parsing
+- `internal/observability/`: OTel spans + metrics under `opencodesdk.*`
 
-- `internal/config/capability.go`
+## Session persistence
 
-## High-Level Components
+opencode owns it. Sessions persist in `$XDG_DATA_HOME/opencode/opencode.db`
+(SQLite) and survive `opencode acp` restarts. Listing is via
+`session/list`; no client-side session metadata store.
 
-- `query.go`: one-shot and query-stream orchestration
-- `client.go` + `client_impl.go`: stateful client interface + implementation
-- `with_client.go`: lifecycle helper wrapper
-- `mcp.go`: `Tool` interface and `NewTool` constructor for SDK-defined tools
-- `internal/subprocess/`: process and app-server adapters
-- `internal/protocol/`: JSON-RPC/session controller, dynamic tool dispatch
-- `internal/message/`: parsing + public message mapping
-- `internal/config/`: options, `DynamicTool` type, and backend capability policy
-- `internal/session/`: SQLite-based session metadata lookup
-- `internal/mcp/`: MCP server integration and status
-
-## Change Impact Guidance
+## Change impact guidance
 
 When changing options, transport, or session behavior:
 
-- verify backend capability mapping in `internal/config/capability.go`
-- update related tests (capability, query/client behavior)
-- keep docs aligned (`README.md`, package docs, CLAUDE rules where needed)
+- Update INIT.md locked decisions if the change affects a decision there.
+- Update affected tests in the same commit.
+- Align `README.md` and `doc.go` with new behavior.
+- Do not push the branch.

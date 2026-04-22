@@ -6,7 +6,7 @@
 go build ./...
 go test ./...
 go test -race ./...
-go test -v -run TestQuery ./...
+go test -v -run TestName ./...
 go test -tags=integration ./integration/...
 golangci-lint run
 go run ./examples/quick_start
@@ -21,5 +21,13 @@ go run ./examples/quick_start
 
 ## Integration Test Notes
 
-- Integration tests require Codex CLI availability and a working runtime setup.
-- If integration tests are not runnable in the current environment, call that out explicitly.
+- Integration tests require the `opencode` CLI (≥ 1.14.20) in `$PATH`
+  and a working opencode auth state (`opencode auth login`).
+- If integration tests are not runnable in the current environment,
+  call that out explicitly rather than skipping silently.
+
+## Migration-Specific
+
+- Each commit on `feat/baseline` must pass `go build ./...`.
+- Tests green at milestone boundaries; mid-milestone red tests are OK
+  if called out in the commit message.

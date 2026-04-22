@@ -2,7 +2,7 @@
 
 ## Core Style
 
-- Keep package and naming consistent with existing code (`codexsdk`).
+- Keep package and naming consistent with existing code (`opencodesdk`).
 - Keep context as the first parameter for blocking operations.
 - Use functional options (`WithXxx(...)`) for configurable behavior.
 - Re-export public-facing types from root package when following existing pattern.
@@ -22,8 +22,10 @@
 ## API and Option Changes
 
 - Keep public option constructors in `options.go`.
-- If option behavior differs by backend, update capability policy in `internal/config/capability.go`.
-- Ensure unsupported combinations fail with `ErrUnsupportedOption`.
+- Options that require subprocess behavior change (e.g. CLI flags) go
+  through the subprocess layer, not the ACP layer.
+- Options that map to `session/new` params or post-session
+  `set_config_option` calls are translated at session-start time.
 
 ## Repo Structure
 

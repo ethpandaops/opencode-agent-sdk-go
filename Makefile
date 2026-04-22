@@ -3,7 +3,7 @@
 
 ## lint: run golangci-lint
 lint:
-	golangci-lint run --new-from-rev="origin/master" ./...
+	golangci-lint run ./...
 
 ## fmt: format code
 fmt:
