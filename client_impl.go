@@ -679,7 +679,41 @@ func (c *client) mergeOptions(override []Option) *options {
 		merged.mcpServers = append([]acp.McpServer{c.bridgeMcpServerEntry()}, merged.mcpServers...)
 	}
 
+	normalizeMcpServerSlices(merged.mcpServers)
+
 	return &merged
+}
+
+// normalizeMcpServerSlices replaces nil inner slices on every
+// McpServer entry with empty slices. opencode's zod schema rejects
+// session/new with -32602 "Invalid params" when args/env/headers
+// serialize as JSON null (e.g. "expected array, received null"),
+// and the acp-go-sdk types lack `omitempty` on those fields. The
+// normalization mirrors the outer-slice handling in mergeOptions so
+// every session-creation path (new/load/fork/resume) sends a
+// schema-clean payload regardless of how callers constructed their
+// McpServer entries.
+func normalizeMcpServerSlices(servers []acp.McpServer) {
+	for i := range servers {
+		switch {
+		case servers[i].Stdio != nil:
+			if servers[i].Stdio.Args == nil {
+				servers[i].Stdio.Args = []string{}
+			}
+
+			if servers[i].Stdio.Env == nil {
+				servers[i].Stdio.Env = []acp.EnvVariable{}
+			}
+		case servers[i].Http != nil:
+			if servers[i].Http.Headers == nil {
+				servers[i].Http.Headers = []acp.HttpHeader{}
+			}
+		case servers[i].Sse != nil:
+			if servers[i].Sse.Headers == nil {
+				servers[i].Sse.Headers = []acp.HttpHeader{}
+			}
+		}
+	}
 }
 
 // bridgeMcpServerEntry builds the McpServer union entry that points
