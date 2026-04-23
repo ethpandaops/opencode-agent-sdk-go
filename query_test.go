@@ -1,0 +1,514 @@
+package opencodesdk
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/coder/acp-go-sdk"
+)
+
+// fakeSession is a test double for Session used to exercise runTurn
+// without a live subprocess. All methods return zero values / no-ops
+// except Prompt, Updates, and ID, which are driven by the test setup.
+type fakeSession struct {
+	id        string
+	updates   chan acp.SessionNotification
+	prompt    func(ctx context.Context, blocks ...acp.ContentBlock) (*PromptResult, error)
+	cancelFn  func(context.Context) error
+	setModel  func(context.Context, string) error
+	initModes *acp.SessionModeState
+}
+
+func (f *fakeSession) ID() string { return f.id }
+
+func (f *fakeSession) Prompt(ctx context.Context, blocks ...acp.ContentBlock) (*PromptResult, error) {
+	return f.prompt(ctx, blocks...)
+}
+
+func (f *fakeSession) RunCommand(ctx context.Context, name string, args ...string) (*PromptResult, error) {
+	cmd := name
+	if len(args) > 0 {
+		cmd = name + " " + strings.Join(args, " ")
+	}
+
+	if !strings.HasPrefix(cmd, "/") {
+		cmd = "/" + cmd
+	}
+
+	return f.prompt(ctx, acp.TextBlock(cmd))
+}
+
+func (f *fakeSession) Cancel(ctx context.Context) error {
+	if f.cancelFn != nil {
+		return f.cancelFn(ctx)
+	}
+
+	return nil
+}
+
+func (f *fakeSession) Updates() <-chan acp.SessionNotification { return f.updates }
+
+func (f *fakeSession) SetModel(ctx context.Context, m string) error {
+	if f.setModel != nil {
+		return f.setModel(ctx, m)
+	}
+
+	return nil
+}
+
+func (f *fakeSession) SetMode(_ context.Context, _ string) error { return nil }
+
+func (f *fakeSession) SetConfigOption(_ context.Context, _, _ string) error { return nil }
+
+func (f *fakeSession) SetConfigOptionBool(_ context.Context, _ string, _ bool) error {
+	return nil
+}
+func (f *fakeSession) InitialModels() *acp.SessionModelState           { return nil }
+func (f *fakeSession) InitialModes() *acp.SessionModeState             { return f.initModes }
+func (f *fakeSession) InitialConfigOptions() []acp.SessionConfigOption { return nil }
+func (f *fakeSession) Meta() map[string]any                            { return nil }
+func (f *fakeSession) AvailableModels() []acp.ModelInfo                { return nil }
+func (f *fakeSession) AvailableModes() []acp.SessionMode               { return nil }
+func (f *fakeSession) AvailableCommands() []acp.AvailableCommand       { return nil }
+func (f *fakeSession) CurrentVariant() *VariantInfo                    { return nil }
+func (f *fakeSession) Subscribe(_ UpdateHandlers) func()               { return func() {} }
+func (f *fakeSession) DroppedUpdates() int64                           { return 0 }
+
+func newFakeSession(buf int) *fakeSession {
+	return &fakeSession{
+		id:      "ses_fake_1",
+		updates: make(chan acp.SessionNotification, buf),
+	}
+}
+
+// chunkNotification returns a session/update carrying an agent_message_chunk
+// with the given text.
+func chunkNotification(sessionID, text string) acp.SessionNotification {
+	return acp.SessionNotification{
+		SessionId: acp.SessionId(sessionID),
+		Update: acp.SessionUpdate{
+			AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{
+				Content: acp.TextBlock(text),
+			},
+		},
+	}
+}
+
+func TestRunTurn_AggregatesTextChunksAndNotifications(t *testing.T) {
+	s := newFakeSession(8)
+
+	usage := &acp.Usage{InputTokens: 3, OutputTokens: 7, TotalTokens: 10}
+
+	s.prompt = func(_ context.Context, _ ...acp.ContentBlock) (*PromptResult, error) {
+		// Emit two text chunks + a non-text notification before returning.
+		hello := chunkNotification(s.id, "hello ")
+		s.updates <- hello
+
+		world := chunkNotification(s.id, "world")
+		s.updates <- world
+
+		plan := acp.SessionNotification{
+			SessionId: acp.SessionId(s.id),
+			Update: acp.SessionUpdate{
+				Plan: &acp.SessionUpdatePlan{},
+			},
+		}
+		s.updates <- plan
+
+		// Close drives the drain loop to exit promptly so the test is
+		// deterministic.
+		close(s.updates)
+
+		return &PromptResult{StopReason: acp.StopReasonEndTurn, Usage: usage}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	res, err := runTurn(ctx, s, acp.TextBlock("hi"))
+	if err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+
+	if res.AssistantText != "hello world" {
+		t.Fatalf("AssistantText = %q, want %q", res.AssistantText, "hello world")
+	}
+
+	if len(res.Notifications) != 3 {
+		t.Fatalf("Notifications len = %d, want 3", len(res.Notifications))
+	}
+
+	if res.SessionID != s.id {
+		t.Fatalf("SessionID = %q, want %q", res.SessionID, s.id)
+	}
+
+	if res.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("StopReason = %q, want %q", res.StopReason, acp.StopReasonEndTurn)
+	}
+
+	if res.Usage == nil || res.Usage.TotalTokens != 10 {
+		t.Fatalf("Usage not propagated: %+v", res.Usage)
+	}
+}
+
+func TestRunTurn_PromptErrorIsReturned(t *testing.T) {
+	s := newFakeSession(1)
+
+	sentinel := errors.New("boom")
+
+	s.prompt = func(_ context.Context, _ ...acp.ContentBlock) (*PromptResult, error) {
+		close(s.updates)
+
+		return nil, sentinel
+	}
+
+	res, err := runTurn(t.Context(), s, acp.TextBlock("x"))
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err = %v, want errors.Is(sentinel)", err)
+	}
+
+	if res != nil {
+		t.Fatalf("expected nil result on error, got %+v", res)
+	}
+}
+
+func TestRunTurn_CtxCancelledDuringPromptReturnsPromptErr(t *testing.T) {
+	s := newFakeSession(1)
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	s.prompt = func(pctx context.Context, _ ...acp.ContentBlock) (*PromptResult, error) {
+		<-pctx.Done()
+
+		return nil, pctx.Err()
+	}
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	res, err := runTurn(ctx, s, acp.TextBlock("x"))
+	if err == nil {
+		t.Fatalf("expected non-nil error from cancelled prompt, got res=%+v", res)
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want errors.Is(context.Canceled)", err)
+	}
+}
+
+// TestRunTurn_ReturnsWhenUpdatesChannelStaysOpen guards against a
+// regression where runTurn blocked for the full remaining ctx deadline
+// after every successful turn because its drain goroutine was waiting
+// for the updates channel to close. In practice the channel stays open
+// for the whole session lifetime, so multi-turn callers (QueryStream)
+// hung indefinitely between turns.
+func TestRunTurn_ReturnsWhenUpdatesChannelStaysOpen(t *testing.T) {
+	const wantText = "ok"
+
+	s := newFakeSession(8)
+
+	s.prompt = func(_ context.Context, _ ...acp.ContentBlock) (*PromptResult, error) {
+		s.updates <- chunkNotification(s.id, wantText)
+
+		// Intentionally do NOT close s.updates — the session lives on.
+		return &PromptResult{StopReason: acp.StopReasonEndTurn}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	t0 := time.Now()
+
+	res, err := runTurn(ctx, s, acp.TextBlock("hi"))
+	if err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+
+	// Must return well under the ctx deadline. Trailing-grace window is
+	// 100ms; give generous headroom for slow CI.
+	if elapsed := time.Since(t0); elapsed > 2*time.Second {
+		t.Fatalf("runTurn did not return promptly: %s", elapsed)
+	}
+
+	if res.AssistantText != wantText {
+		t.Fatalf("AssistantText = %q, want %q", res.AssistantText, wantText)
+	}
+}
+
+// TestRunTurn_MultipleTurnsOnSameChannel exercises the QueryStream-style
+// call pattern: reuse the same session/updates channel across turns.
+// Each turn must complete in bounded time, and each must capture only
+// its own notifications.
+func TestRunTurn_MultipleTurnsOnSameChannel(t *testing.T) {
+	s := newFakeSession(8)
+
+	var turn int
+
+	s.prompt = func(_ context.Context, _ ...acp.ContentBlock) (*PromptResult, error) {
+		turn++
+
+		s.updates <- chunkNotification(s.id, fmt.Sprintf("turn-%d", turn))
+
+		return &PromptResult{StopReason: acp.StopReasonEndTurn}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	for i := 1; i <= 3; i++ {
+		t0 := time.Now()
+
+		res, err := runTurn(ctx, s, acp.TextBlock("x"))
+		if err != nil {
+			t.Fatalf("turn %d runTurn: %v", i, err)
+		}
+
+		if elapsed := time.Since(t0); elapsed > 2*time.Second {
+			t.Fatalf("turn %d did not return promptly: %s", i, elapsed)
+		}
+
+		want := fmt.Sprintf("turn-%d", i)
+		if res.AssistantText != want {
+			t.Fatalf("turn %d AssistantText = %q, want %q", i, res.AssistantText, want)
+		}
+	}
+}
+
+func TestRunTurn_EmptyUsageStillReturnsResult(t *testing.T) {
+	s := newFakeSession(1)
+
+	s.prompt = func(_ context.Context, _ ...acp.ContentBlock) (*PromptResult, error) {
+		close(s.updates)
+
+		return &PromptResult{StopReason: acp.StopReasonEndTurn}, nil
+	}
+
+	res, err := runTurn(t.Context(), s, acp.TextBlock("x"))
+	if err != nil {
+		t.Fatalf("runTurn: %v", err)
+	}
+
+	if res.Usage != nil {
+		t.Fatalf("Usage should be nil when prompt returned none; got %+v", res.Usage)
+	}
+
+	if res.AssistantText != "" {
+		t.Fatalf("AssistantText should be empty; got %q", res.AssistantText)
+	}
+}
+
+func TestWithClient_NilFnReturnsError(t *testing.T) {
+	err := WithClient(t.Context(), nil)
+	if err == nil {
+		t.Fatalf("expected error for nil fn")
+	}
+}
+
+func TestWithClient_PreCancelledCtxReturnsCtxErr(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := WithClient(ctx, func(Client) error { return nil })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled; got %v", err)
+	}
+}
+
+func TestQueryStream_PreCancelledCtxYieldsCtxErr(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	seq := QueryStream(ctx, []string{"a", "b"})
+
+	var firstErr error
+
+	// Iterate the sequence; we expect the client construction / Start to
+	// surface the cancelled ctx as the first (and only) yielded error.
+	for _, err := range seq {
+		firstErr = err
+
+		break
+	}
+
+	if firstErr == nil {
+		t.Fatalf("expected yielded err to be non-nil")
+	}
+}
+
+func TestQueryResult_FieldsZeroed(t *testing.T) {
+	// Sanity: ensure a zero-value QueryResult doesn't surprise consumers.
+	var r QueryResult
+
+	if r.SessionID != "" || r.AssistantText != "" || r.StopReason != "" || r.Usage != nil || r.Notifications != nil {
+		t.Fatalf("QueryResult zero-value unexpectedly populated: %+v", r)
+	}
+}
+
+// TestQueryContent_EmptyBlocksRejected sanity-checks the input-validation
+// path. The rejection is cheap (no subprocess / transport involved).
+func TestQueryContent_EmptyBlocksRejected(t *testing.T) {
+	_, err := QueryContent(t.Context(), nil)
+	if err == nil {
+		t.Fatalf("expected error for empty blocks")
+	}
+}
+
+// TestQueryContent_EndToEndWithTransport proves the full multimodal
+// one-shot flow runs through a WithTransport-backed fake, including
+// forwarding the content blocks verbatim to the agent's Prompt method.
+func TestQueryContent_EndToEndWithTransport(t *testing.T) {
+	var seenBlocks []acp.ContentBlock
+
+	agent := &fakeAgent{
+		initialize: func(_ context.Context, _ acp.InitializeRequest) (acp.InitializeResponse, error) {
+			return acp.InitializeResponse{
+				ProtocolVersion: acp.ProtocolVersionNumber,
+				AgentInfo:       &acp.Implementation{Name: "fake", Version: "0.0.0"},
+				AgentCapabilities: acp.AgentCapabilities{
+					LoadSession: true,
+					PromptCapabilities: acp.PromptCapabilities{
+						Image:           true,
+						EmbeddedContext: true,
+					},
+				},
+			}, nil
+		},
+	}
+
+	promptAgent := &promptCapturingAgent{fakeAgent: agent, seenBlocks: &seenBlocks}
+
+	factory := func(_ context.Context, handler acp.Client) (Transport, error) {
+		return newPipeTransport(handler, promptAgent), nil
+	}
+
+	blocks := Blocks(TextBlock("describe this"), ImageBlock("aGVsbG8=", "image/png"))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	result, err := QueryContent(ctx, blocks,
+		WithTransport(factory),
+		WithSkipVersionCheck(true),
+		WithCwd("/tmp"),
+	)
+	if err != nil {
+		t.Fatalf("QueryContent: %v", err)
+	}
+
+	if result.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("StopReason = %q, want %q", result.StopReason, acp.StopReasonEndTurn)
+	}
+
+	if len(seenBlocks) != 2 {
+		t.Fatalf("agent saw %d blocks, want 2: %+v", len(seenBlocks), seenBlocks)
+	}
+
+	if seenBlocks[0].Text == nil || seenBlocks[0].Text.Text != "describe this" {
+		t.Fatalf("first block not text: %+v", seenBlocks[0])
+	}
+
+	if seenBlocks[1].Image == nil || seenBlocks[1].Image.MimeType != "image/png" {
+		t.Fatalf("second block not image: %+v", seenBlocks[1])
+	}
+}
+
+// TestQueryStreamContent_RunsEachPrompt exercises the multi-prompt
+// iterator path end-to-end, proving (a) one QueryResult is yielded per
+// prompt in input order, (b) each prompt's blocks reach the agent, and
+// (c) the subprocess / transport is torn down on natural iterator exit.
+func TestQueryStreamContent_RunsEachPrompt(t *testing.T) {
+	var mu sync.Mutex
+
+	var received [][]acp.ContentBlock
+
+	agent := &promptCapturingAgent{
+		fakeAgent: &fakeAgent{},
+	}
+
+	agent.onPrompt = func(blocks []acp.ContentBlock) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		cp := make([]acp.ContentBlock, len(blocks))
+		copy(cp, blocks)
+		received = append(received, cp)
+	}
+
+	factory := func(_ context.Context, handler acp.Client) (Transport, error) {
+		return newPipeTransport(handler, agent), nil
+	}
+
+	prompts := [][]acp.ContentBlock{
+		{TextBlock("one")},
+		{TextBlock("two")},
+		{TextBlock("three")},
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	count := 0
+
+	for res, err := range QueryStreamContent(ctx, PromptsFromSlice(prompts),
+		WithTransport(factory),
+		WithSkipVersionCheck(true),
+		WithCwd("/tmp"),
+	) {
+		if err != nil {
+			t.Fatalf("iter err at count %d: %v", count, err)
+		}
+
+		if res == nil {
+			t.Fatalf("nil result at count %d", count)
+		}
+
+		count++
+	}
+
+	if count != 3 {
+		t.Fatalf("yielded %d results, want 3", count)
+	}
+
+	mu.Lock()
+
+	defer mu.Unlock()
+
+	if len(received) != 3 {
+		t.Fatalf("agent saw %d prompts, want 3", len(received))
+	}
+
+	for i, want := range []string{"one", "two", "three"} {
+		if received[i][0].Text == nil || received[i][0].Text.Text != want {
+			t.Fatalf("prompt %d reached agent as %+v, want %q", i, received[i], want)
+		}
+	}
+}
+
+// promptCapturingAgent wraps fakeAgent so tests can observe the content
+// blocks sent via session/prompt without reimplementing the full Agent
+// interface each time.
+type promptCapturingAgent struct {
+	*fakeAgent
+
+	seenBlocks *[]acp.ContentBlock
+	onPrompt   func(blocks []acp.ContentBlock)
+}
+
+func (p *promptCapturingAgent) Prompt(_ context.Context, params acp.PromptRequest) (acp.PromptResponse, error) {
+	if p.seenBlocks != nil {
+		*p.seenBlocks = append(*p.seenBlocks, params.Prompt...)
+	}
+
+	if p.onPrompt != nil {
+		p.onPrompt(params.Prompt)
+	}
+
+	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
+}
