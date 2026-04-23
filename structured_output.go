@@ -137,19 +137,83 @@ func DecodePromptResult[T any](result *PromptResult) (T, error) {
 	return out, err
 }
 
-// WithOutputSchema embeds a structured-output hint into the session's
-// _meta block so agents that honour the convention know what shape
-// to emit. opencode itself does not enforce the schema; this option
-// is a best-effort passthrough that sets
-// session.meta["structuredOutputSchema"] so downstream logic (SDK
-// helpers, UI, or the model via prompt engineering) can read it.
+// WithOutputSchema requests structured JSON output matching schema.
 //
-// schema must be a JSON-schema compatible map (see SimpleSchema for
-// the common case). Pass nil to clear any previously set schema.
+// Enforcement mechanism (matches opencode's JS-SDK PR #8161 and
+// Claude Code's approach): when set, the SDK registers an implicit
+// MCP tool named StructuredOutput with schema as its input schema
+// via the loopback bridge. The model's provider (Anthropic, OpenAI,
+// etc.) validates tool_use inputs against that schema at the API
+// boundary, so any tool call opencode routes back to the SDK is
+// shape-guaranteed. Session.Prompt also prepends a system-style
+// instruction block telling the model to deliver its final answer
+// by calling StructuredOutput exactly once. The captured payload is
+// surfaced via PromptResult.Meta["structuredOutput"] and on
+// QueryResult.Notifications so DecodeStructuredOutput[T] returns it
+// at priority 0.
+//
+// schema may be either form:
+//
+//   - The bare JSON Schema object, e.g.
+//     {"type": "object", "properties": {...}}.
+//   - The provider-agnostic envelope used by Claude Code / Codex and
+//     by opencode's JS SDK session.prompt format:
+//     {"type": "json_schema", "schema": {...}}. The SDK unwraps this
+//     automatically so callers can pass the same value to
+//     claude-agent-sdk-go, codex-agent-sdk-go, and this SDK without
+//     adapter shims.
+//
+// See SimpleSchema for the common bare-object case. The SDK also
+// embeds the inner schema in session/new's
+// _meta["structuredOutputSchema"] for downstream consumers; opencode
+// itself does not enforce the meta-level hint. Pass nil (or an
+// envelope with no inner schema) to clear any previously set schema.
+//
+// Known gaps vs. opencode's JS-SDK session.prompt({format: ...}):
+//
+//   - No tool_choice: "required". opencode constructs the provider
+//     request below the ACP surface, so we cannot force the model to
+//     call the tool; we can only instruct via prompt. Frontier models
+//     (Opus 4.7, Sonnet 4.6, GPT-5) comply reliably; smaller models
+//     in opencode's catalog may emit prose instead. When that happens
+//     DecodeStructuredOutput returns ErrStructuredOutputMissing.
+//   - No in-agent-loop retry. opencode's JS SDK retries within the
+//     same turn on validation failure (default 2). ACP does not
+//     expose that primitive, so this SDK surfaces failures and lets
+//     callers decide whether to re-prompt (which starts a new turn
+//     and doubles cost).
+//   - Single-flight capture per Client. Concurrent Session.Prompt
+//     calls on the same Client that both trigger StructuredOutput may
+//     clobber each other's captured payloads. Serialize prompts or
+//     use one Client per concurrent schema.
 //
 // Returns an Option usable with NewClient / NewSession / Query.
 func WithOutputSchema(schema map[string]any) Option {
-	return func(o *options) { o.outputSchema = schema }
+	return func(o *options) { o.outputSchema = unwrapOutputSchemaEnvelope(schema) }
+}
+
+// unwrapOutputSchemaEnvelope strips the provider-agnostic
+// {"type":"json_schema","schema":{...}} envelope Claude/Codex accept
+// at their API boundary and returns the inner JSON Schema object.
+// Bare JSON Schema objects pass through unchanged. An envelope with
+// no usable inner schema becomes nil, matching opencode's "clear
+// schema" semantic for nil input.
+func unwrapOutputSchemaEnvelope(schema map[string]any) map[string]any {
+	if len(schema) == 0 {
+		return nil
+	}
+
+	wrapperType, _ := schema["type"].(string)
+	if wrapperType != "json_schema" {
+		return schema
+	}
+
+	inner, ok := schema["schema"].(map[string]any)
+	if !ok || len(inner) == 0 {
+		return nil
+	}
+
+	return inner
 }
 
 // decodeFromNotifications scans a slice of session notifications for

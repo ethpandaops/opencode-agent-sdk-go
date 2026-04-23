@@ -115,6 +115,7 @@ func main() {
 		opencodesdk.WithTransport(factory),
 		opencodesdk.WithSkipVersionCheck(true),
 		opencodesdk.WithCwd(os.TempDir()),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "QueryContent: %v\n", err)

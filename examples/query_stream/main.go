@@ -41,6 +41,7 @@ func main() {
 	for res, err := range opencodesdk.QueryStream(ctx, prompts,
 		opencodesdk.WithLogger(logger),
 		opencodesdk.WithCwd(cwd),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	) {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "QueryStream error at prompt %d: %v\n", cursor, err)

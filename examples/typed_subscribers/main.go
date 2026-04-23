@@ -25,6 +25,7 @@ func main() {
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(logger),
 		opencodesdk.WithCwd(cwd),
+		opencodesdk.WithModel("opencode/big-pickle"),
 		opencodesdk.WithOnTurnComplete(func(_ context.Context, sid string, res *opencodesdk.PromptResult, err error) {
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "\n[turn-complete %s] error: %v\n", sid, err)

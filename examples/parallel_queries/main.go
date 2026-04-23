@@ -62,6 +62,7 @@ func main() {
 			res, err := opencodesdk.Query(ctx, prompt,
 				opencodesdk.WithLogger(logger),
 				opencodesdk.WithCwd(cwd),
+				opencodesdk.WithModel("opencode/big-pickle"),
 			)
 
 			r := result{style: style, elapsed: time.Since(started), err: err}

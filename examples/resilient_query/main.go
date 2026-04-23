@@ -38,6 +38,7 @@ func main() {
 		},
 		opencodesdk.WithLogger(logger),
 		opencodesdk.WithCwd(cwd),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		classification := opencodesdk.ClassifyError(err)

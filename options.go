@@ -69,6 +69,7 @@ type options struct {
 	onUpdateDropped       UpdateDroppedCallback
 	onElicitation         ElicitationCallback
 	onElicitationComplete ElicitationCompleteCallback
+	onUserInput           UserInputCallback
 
 	// Hook registrations keyed by event. Populated via WithHooks.
 	hooks map[HookEvent][]*HookMatcher

@@ -12,7 +12,7 @@
 #   -o DIR        Output directory for logs (default: /tmp/sdk-example-tests-<timestamp>)
 #   -s EXAMPLES   Comma-separated list of examples to skip
 #   -f EXAMPLES   Comma-separated list of examples to run (filter, run only these)
-#   -m MODEL      Opencode model to use for verification (default: CLI default)
+#   -m MODEL      Opencode model for verification (default: opencode/nemotron-3-super-free)
 #   -a AGENT      Opencode agent for verification (default: build)
 #   -k            Keep going on failure (default: stop on first failure in summary)
 #   -h            Help
@@ -54,7 +54,10 @@ TIMEOUT=120
 OUTDIR=""
 SKIP_LIST=""
 FILTER_LIST=""
-VERIFY_MODEL=""
+# Default to a free opencode-hosted model so running the full suite
+# doesn't drain paid-provider credits. Override with -m for a stronger
+# judge on borderline cases.
+VERIFY_MODEL="opencode/nemotron-3-super-free"
 VERIFY_AGENT="build"
 KEEP_GOING=false
 

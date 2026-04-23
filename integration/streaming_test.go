@@ -25,6 +25,7 @@ func TestStreaming_AgentMessageChunksArrive(t *testing.T) {
 		"Reply with exactly the phrase: the quick brown fox.",
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)
@@ -63,6 +64,7 @@ func TestStreaming_UsageReported(t *testing.T) {
 		"Say hello in one word.",
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)
@@ -89,6 +91,7 @@ func TestStreaming_UpdatesChannelClosesOnClientClose(t *testing.T) {
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -180,6 +183,7 @@ func TestStreaming_MultiTurnSameSession(t *testing.T) {
 	},
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)

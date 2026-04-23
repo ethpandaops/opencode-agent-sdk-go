@@ -57,6 +57,7 @@ func demoCLINotFound(ctx context.Context, logger *slog.Logger) {
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(logger),
 		opencodesdk.WithCLIPath("/nonexistent/opencode-binary"),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		fmt.Printf("NewClient: %v\n", err)
@@ -74,7 +75,10 @@ func demoCLINotFound(ctx context.Context, logger *slog.Logger) {
 func demoClientNotStarted(ctx context.Context, logger *slog.Logger) {
 	fmt.Println("== demoClientNotStarted ==")
 
-	c, err := opencodesdk.NewClient(opencodesdk.WithLogger(logger))
+	c, err := opencodesdk.NewClient(
+		opencodesdk.WithLogger(logger),
+		opencodesdk.WithModel("opencode/big-pickle"),
+	)
 	if err != nil {
 		fmt.Printf("NewClient: %v\n", err)
 
@@ -90,7 +94,10 @@ func demoClientNotStarted(ctx context.Context, logger *slog.Logger) {
 func demoClientClosed(ctx context.Context, logger *slog.Logger) {
 	fmt.Println("== demoClientClosed ==")
 
-	c, err := opencodesdk.NewClient(opencodesdk.WithLogger(logger))
+	c, err := opencodesdk.NewClient(
+		opencodesdk.WithLogger(logger),
+		opencodesdk.WithModel("opencode/big-pickle"),
+	)
 	if err != nil {
 		fmt.Printf("NewClient: %v\n", err)
 
@@ -110,7 +117,10 @@ func demoClientClosed(ctx context.Context, logger *slog.Logger) {
 func demoClientAlreadyConnected(ctx context.Context, logger *slog.Logger) {
 	fmt.Println("== demoClientAlreadyConnected ==")
 
-	c, err := opencodesdk.NewClient(opencodesdk.WithLogger(logger))
+	c, err := opencodesdk.NewClient(
+		opencodesdk.WithLogger(logger),
+		opencodesdk.WithModel("opencode/big-pickle"),
+	)
 	if err != nil {
 		fmt.Printf("NewClient: %v\n", err)
 
@@ -139,6 +149,7 @@ func demoSDKErrorMarker(_ context.Context, logger *slog.Logger) {
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(logger),
 		opencodesdk.WithCLIPath("/nonexistent/opencode-binary"),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		fmt.Printf("NewClient: %v\n", err)

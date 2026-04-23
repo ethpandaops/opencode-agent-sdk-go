@@ -97,6 +97,7 @@ func main() {
 	},
 		opencodesdk.WithLogger(logger),
 		opencodesdk.WithCwd(cwd),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "WithClient: %v\n", err)

@@ -20,6 +20,7 @@ func TestAuthCapability_InfoAndMethods(t *testing.T) {
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -56,6 +57,7 @@ func TestAuthCapability_TerminalAuthMetaExposed(t *testing.T) {
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
 		opencodesdk.WithTerminalAuthCapability(true),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)

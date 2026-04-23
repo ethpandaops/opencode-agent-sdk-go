@@ -43,6 +43,7 @@ func TestMCPTools_SDKToolInvokedByAgent(t *testing.T) {
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
 		opencodesdk.WithSDKTools(getSecret),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)
@@ -86,6 +87,7 @@ func TestMCPTools_ToolError(t *testing.T) {
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
 		opencodesdk.WithSDKTools(failing),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)
@@ -144,6 +146,7 @@ func TestMCPTools_ToolWithAnnotations(t *testing.T) {
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
 		opencodesdk.WithSDKTools(readOnly),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)
@@ -219,6 +222,7 @@ func TestMCPTools_MultipleToolsCoexist(t *testing.T) {
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
 		opencodesdk.WithSDKTools(echo, reverse),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)

@@ -22,6 +22,7 @@ import (
 	"github.com/ethpandaops/opencode-agent-sdk-go/internal/mcp/bridge"
 	"github.com/ethpandaops/opencode-agent-sdk-go/internal/observability"
 	"github.com/ethpandaops/opencode-agent-sdk-go/internal/subprocess"
+	"github.com/ethpandaops/opencode-agent-sdk-go/internal/tuimodel"
 )
 
 const bridgeMcpName = "opencodesdk"
@@ -55,6 +56,11 @@ type client struct {
 	// Drained into the session channel at registerSession time.
 	// Per-session cap: pendingUpdatesCap.
 	pendingUpdates map[acp.SessionId][]acp.SessionNotification
+
+	// structuredOutput, when non-nil, is the latching capture slot the
+	// implicit StructuredOutput bridge tool writes to. Session.Prompt
+	// drains it after each turn. Installed when WithOutputSchema is set.
+	structuredOutput *structuredOutputCapture
 
 	bridge *bridge.Bridge
 
@@ -139,8 +145,13 @@ func (c *client) Start(ctx context.Context) error {
 		Cwd:               c.opts.cwd,
 	}
 
-	if len(c.opts.sdkTools) > 0 {
-		br, brErr := bridge.New(toolsToBridgeDefs(c.opts.sdkTools), c.opts.logger, c.observer)
+	bridgeDefs, brErr := c.assembleBridgeTools()
+	if brErr != nil {
+		return brErr
+	}
+
+	if len(bridgeDefs) > 0 {
+		br, brErr := bridge.New(bridgeDefs, c.opts.logger, c.observer)
 		if brErr != nil {
 			return fmt.Errorf("creating mcp bridge: %w", brErr)
 		}
@@ -679,7 +690,51 @@ func (c *client) mergeOptions(override []Option) *options {
 		merged.mcpServers = append([]acp.McpServer{c.bridgeMcpServerEntry()}, merged.mcpServers...)
 	}
 
+	normalizeMcpServerSlices(merged.mcpServers)
+
+	if merged.model == "" {
+		if m := tuimodel.Resolve(); m != "" {
+			merged.model = m
+
+			if c.opts.logger != nil {
+				c.opts.logger.Debug("resolved TUI default model", slog.String("model", m))
+			}
+		}
+	}
+
 	return &merged
+}
+
+// normalizeMcpServerSlices replaces nil inner slices on every
+// McpServer entry with empty slices. opencode's zod schema rejects
+// session/new with -32602 "Invalid params" when args/env/headers
+// serialize as JSON null (e.g. "expected array, received null"),
+// and the acp-go-sdk types lack `omitempty` on those fields. The
+// normalization mirrors the outer-slice handling in mergeOptions so
+// every session-creation path (new/load/fork/resume) sends a
+// schema-clean payload regardless of how callers constructed their
+// McpServer entries.
+func normalizeMcpServerSlices(servers []acp.McpServer) {
+	for i := range servers {
+		switch {
+		case servers[i].Stdio != nil:
+			if servers[i].Stdio.Args == nil {
+				servers[i].Stdio.Args = []string{}
+			}
+
+			if servers[i].Stdio.Env == nil {
+				servers[i].Stdio.Env = []acp.EnvVariable{}
+			}
+		case servers[i].Http != nil:
+			if servers[i].Http.Headers == nil {
+				servers[i].Http.Headers = []acp.HttpHeader{}
+			}
+		case servers[i].Sse != nil:
+			if servers[i].Sse.Headers == nil {
+				servers[i].Sse.Headers = []acp.HttpHeader{}
+			}
+		}
+	}
 }
 
 // bridgeMcpServerEntry builds the McpServer union entry that points
@@ -696,6 +751,54 @@ func (c *client) bridgeMcpServerEntry() acp.McpServer {
 			},
 		},
 	}
+}
+
+// assembleBridgeTools returns the bridge.ToolDef slice the client
+// should hand to bridge.New. Combines user-supplied WithSDKTools entries
+// with implicit tools the SDK registers on behalf of features like
+// WithOnUserInput (AskUserQuestion) and WithOutputSchema
+// (StructuredOutput), and rejects name collisions.
+func (c *client) assembleBridgeTools() ([]bridge.ToolDef, error) {
+	defs := toolsToBridgeDefs(c.opts.sdkTools)
+
+	if c.opts.onUserInput != nil {
+		if err := ensureNoUserToolCollision(c.opts.sdkTools, AskUserQuestionToolName, "WithOnUserInput"); err != nil {
+			return nil, err
+		}
+
+		defs = append(defs, askUserQuestionBridgeDef(c.opts.onUserInput, c.opts.logger))
+	}
+
+	if c.opts.outputSchema != nil {
+		if err := ensureNoUserToolCollision(c.opts.sdkTools, StructuredOutputToolName, "WithOutputSchema"); err != nil {
+			return nil, err
+		}
+
+		if c.structuredOutput == nil {
+			c.structuredOutput = newStructuredOutputCapture()
+		}
+
+		defs = append(defs, structuredOutputBridgeDef(c.opts.outputSchema, c.structuredOutput, c.opts.logger))
+	}
+
+	return defs, nil
+}
+
+// ensureNoUserToolCollision returns an error when the user's SDKTools
+// include a tool named `reserved`. The `feature` label names the
+// implicit registration (e.g. "WithOnUserInput") so the error points
+// at the option the caller must drop.
+func ensureNoUserToolCollision(userTools []Tool, reserved, feature string) error {
+	for _, t := range userTools {
+		if t.Name() == reserved {
+			return fmt.Errorf(
+				"opencodesdk: WithSDKTools registered a tool named %q which conflicts with %s; drop one",
+				reserved, feature,
+			)
+		}
+	}
+
+	return nil
 }
 
 // toolsToBridgeDefs maps opencodesdk.Tool instances to the bridge-

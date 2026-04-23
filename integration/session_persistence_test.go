@@ -40,6 +40,7 @@ func TestSessionPersistence_ListSessionsAfterNewSession(t *testing.T) {
 	},
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(cwd),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)
@@ -70,6 +71,7 @@ func TestSessionPersistence_ListSessionsAfterNewSession(t *testing.T) {
 	},
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(cwd),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)
@@ -104,6 +106,7 @@ func TestSessionPersistence_LoadSessionReplay(t *testing.T) {
 	},
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(cwd),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)
@@ -131,6 +134,7 @@ func TestSessionPersistence_LoadSessionReplay(t *testing.T) {
 	},
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(cwd),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)
@@ -164,6 +168,7 @@ func TestSessionPersistence_LoadSessionHistory(t *testing.T) {
 	},
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(cwd),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)
@@ -195,6 +200,7 @@ func TestSessionPersistence_LoadSessionHistory(t *testing.T) {
 	},
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(cwd),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)
@@ -224,6 +230,7 @@ func TestSessionPersistence_ListSessionsPagination(t *testing.T) {
 	},
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)
