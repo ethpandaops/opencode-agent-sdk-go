@@ -2,6 +2,8 @@ package opencodesdk
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -107,5 +109,63 @@ func TestMergeOptionsNormalizesMcpServerSlices(t *testing.T) {
 		if strings.Contains(string(buf), needle) {
 			t.Errorf("marshaled payload contains %s: %s", needle, buf)
 		}
+	}
+}
+
+// TestMergeOptionsResolvesTUIDefaultModel checks that mergeOptions
+// pulls the opencode TUI's last-used model from model.json when the
+// caller didn't pass WithModel.
+func TestMergeOptionsResolvesTUIDefaultModel(t *testing.T) {
+	dir := t.TempDir()
+
+	subdir := filepath.Join(dir, "opencode")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	payload := `{
+		"recent": [{"providerID": "openrouter", "modelID": "anthropic/claude-opus-4.7"}],
+		"variant": {"openrouter/anthropic/claude-opus-4.7": "medium"}
+	}`
+
+	if err := os.WriteFile(filepath.Join(subdir, "model.json"), []byte(payload), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	t.Setenv("XDG_STATE_HOME", dir)
+
+	c := &client{opts: apply(nil)}
+
+	merged := c.mergeOptions(nil)
+
+	want := "openrouter/anthropic/claude-opus-4.7/medium"
+	if merged.model != want {
+		t.Errorf("merged.model = %q, want %q", merged.model, want)
+	}
+}
+
+// TestMergeOptionsExplicitModelBeatsTUIDefault ensures an explicit
+// WithModel wins over the TUI's model.json.
+func TestMergeOptionsExplicitModelBeatsTUIDefault(t *testing.T) {
+	dir := t.TempDir()
+
+	subdir := filepath.Join(dir, "opencode")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	payload := `{"recent": [{"providerID": "openrouter", "modelID": "anthropic/claude-opus-4.7"}]}`
+	if err := os.WriteFile(filepath.Join(subdir, "model.json"), []byte(payload), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	t.Setenv("XDG_STATE_HOME", dir)
+
+	c := &client{opts: apply([]Option{WithModel("opencode/big-pickle")})}
+
+	merged := c.mergeOptions(nil)
+
+	if merged.model != "opencode/big-pickle" {
+		t.Errorf("merged.model = %q, want explicit opencode/big-pickle", merged.model)
 	}
 }

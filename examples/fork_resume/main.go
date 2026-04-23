@@ -32,6 +32,7 @@ func main() {
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(logger),
 		opencodesdk.WithCwd(cwd),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		exitf("NewClient: %v", err)

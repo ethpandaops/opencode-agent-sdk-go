@@ -75,6 +75,7 @@ func TestAllowedTools_AutoApproved(t *testing.T) {
 		opencodesdk.WithCwd(cwd),
 		opencodesdk.WithCanUseTool(userCB),
 		opencodesdk.WithAllowedTools("edit", "write"),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)
@@ -129,6 +130,7 @@ func TestDisallowedTools_AutoRejected(t *testing.T) {
 		opencodesdk.WithCwd(cwd),
 		opencodesdk.WithCanUseTool(userCB),
 		opencodesdk.WithDisallowedTools("bash"),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)

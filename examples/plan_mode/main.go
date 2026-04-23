@@ -46,6 +46,7 @@ func main() {
 		opencodesdk.WithLogger(logger),
 		opencodesdk.WithCwd(sandbox),
 		opencodesdk.WithInitialMode(opencodesdk.ModePlan),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		exitf("NewClient: %v", err)

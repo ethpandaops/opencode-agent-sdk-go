@@ -20,6 +20,7 @@ func TestQuery_OneShot(t *testing.T) {
 		"Reply with only the digit: 7.",
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)
@@ -58,6 +59,7 @@ func TestQueryStream_MultiPrompt(t *testing.T) {
 	for res, err := range opencodesdk.QueryStream(ctx, prompts,
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	) {
 		if err != nil {
 			skipIfCLIUnavailable(t, err)

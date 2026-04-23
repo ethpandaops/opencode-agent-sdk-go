@@ -509,6 +509,11 @@ func (s *session) Prompt(ctx context.Context, blocks ...acp.ContentBlock) (*Prom
 		return nil, err
 	}
 
+	if s.client.opts.outputSchema != nil {
+		instruction := acp.TextBlock(structuredOutputInstructionText(s.client.opts.outputSchema))
+		blocks = append([]acp.ContentBlock{instruction}, blocks...)
+	}
+
 	// HookEventUserPromptSubmit: blocking-capable. A hook returning
 	// Continue=false short-circuits the prompt before it reaches
 	// opencode.
@@ -607,6 +612,16 @@ func (s *session) Prompt(ctx context.Context, blocks ...acp.ContentBlock) (*Prom
 		StopReason: resp.StopReason,
 		Usage:      resp.Usage,
 		Meta:       resp.Meta,
+	}
+
+	if s.client.structuredOutput != nil {
+		if payload := s.client.structuredOutput.drain(); payload != nil {
+			if result.Meta == nil {
+				result.Meta = map[string]any{}
+			}
+
+			result.Meta[structuredOutputMetaKey] = payload
+		}
 	}
 
 	s.fireTurnComplete(ctx, result, nil)

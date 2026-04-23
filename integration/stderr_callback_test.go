@@ -46,6 +46,7 @@ func TestStderrCallback_ReceivesLines(t *testing.T) {
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
 		opencodesdk.WithStderr(cb),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)

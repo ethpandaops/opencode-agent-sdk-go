@@ -115,6 +115,56 @@ func TestWithOutputSchema_PopulatesOptions(t *testing.T) {
 	}
 }
 
+func TestWithOutputSchema_UnwrapsJSONSchemaEnvelope(t *testing.T) {
+	envelope := map[string]any{
+		"type": "json_schema",
+		"schema": map[string]any{
+			"type": schemaTypeObject,
+			"properties": map[string]any{
+				"name": map[string]any{"type": "string"},
+			},
+			"required": []string{"name"},
+		},
+	}
+
+	o := apply([]Option{WithOutputSchema(envelope)})
+
+	if o.outputSchema == nil {
+		t.Fatal("expected inner schema stored, got nil")
+	}
+
+	if o.outputSchema["type"] != schemaTypeObject {
+		t.Errorf("expected inner type=object, got %v", o.outputSchema["type"])
+	}
+
+	if _, wrapped := o.outputSchema["schema"]; wrapped {
+		t.Errorf("envelope was not unwrapped: %+v", o.outputSchema)
+	}
+}
+
+func TestWithOutputSchema_EnvelopeWithoutInnerIsCleared(t *testing.T) {
+	envelope := map[string]any{"type": "json_schema"}
+
+	o := apply([]Option{WithOutputSchema(envelope)})
+
+	if o.outputSchema != nil {
+		t.Errorf("expected nil for envelope with no inner, got %+v", o.outputSchema)
+	}
+}
+
+func TestWithOutputSchema_BareSchemaPassesThrough(t *testing.T) {
+	bare := map[string]any{
+		"type":       schemaTypeObject,
+		"properties": map[string]any{"x": map[string]any{"type": "string"}},
+	}
+
+	o := apply([]Option{WithOutputSchema(bare)})
+
+	if o.outputSchema == nil || o.outputSchema["type"] != schemaTypeObject {
+		t.Errorf("bare schema corrupted: %+v", o.outputSchema)
+	}
+}
+
 func TestSessionNewMeta_NoSchema(t *testing.T) {
 	if m := sessionNewMeta(apply(nil)); m != nil {
 		t.Fatalf("expected nil meta, got %+v", m)

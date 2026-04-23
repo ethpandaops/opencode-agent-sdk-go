@@ -11,18 +11,16 @@
 ## Dev Commands
 
 ```bash
-go build ./...
+go build ./...           # compile + typecheck
 go test ./...
 go test -race ./...
 go test -v -run TestName ./...
+go test -tags=integration ./integration/...   # requires opencode CLI + auth
 golangci-lint run
+go run ./examples/quick_start
 ```
 
-Run in order: lint → typecheck → test → test -race.
-
-## Integration Tests
-
-`integration/` requires `opencode` CLI in `$PATH` and a working auth state (`opencode auth login`).
+Run: **build → test → test -race** (lint last).
 
 ## Key APIs
 
@@ -30,15 +28,14 @@ Run in order: lint → typecheck → test → test -race.
 - **Iterator**: `QueryStream(ctx, prompts, opts...)`
 - **Stateful**: `NewClient(opts...)` → `Client` → `Session`
 - **Lifecycle helper**: `WithClient(ctx, fn, opts...) error`
-- **Client-less**: `StatSession(ctx, sessionID, opts...)` reads opencode's SQLite (`$XDG_DATA_HOME/opencode/opencode.db`)
+- **Client-less**: `StatSession(ctx, sessionID, opts...)` reads opencode's SQLite
 - **Session listing**: `Client.ListSessions(ctx, cursor)`
 
 ## Architecture
 
 - Single transport: `opencode acp` over stdio JSON-RPC via `github.com/coder/acp-go-sdk`
-- No dual-backend routing
 - In-process tools via loopback HTTP MCP bridge (`WithSDKTools`)
-- opencode owns session persistence in `$XDG_DATA_HOME/opencode/opencode.db`
+- Session persistence: `$XDG_DATA_HOME/opencode/opencode.db`
 
 ## Boundaries
 

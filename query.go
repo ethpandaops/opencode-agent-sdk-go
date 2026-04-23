@@ -290,6 +290,17 @@ func runTurn(ctx context.Context, sess Session, blocks ...acp.ContentBlock) (*Qu
 
 	res, promptErr := sess.Prompt(ctx, blocks...)
 
+	// Surface a StructuredOutput payload captured via WithOutputSchema
+	// onto the notifications stream so DecodeStructuredOutput finds it
+	// at priority 0, ahead of the text-parse fallback.
+	if promptErr == nil && res != nil {
+		if payload, ok := res.Meta[structuredOutputMetaKey]; ok {
+			notifications = append(notifications, acp.SessionNotification{
+				Meta: map[string]any{structuredOutputMetaKey: payload},
+			})
+		}
+	}
+
 	// Grace window for any trailing session/update notifications still
 	// in flight from opencode. Short-circuits if ctx is already done.
 	grace := time.NewTimer(trailingUpdatesGrace)

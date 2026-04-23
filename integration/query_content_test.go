@@ -24,6 +24,7 @@ func TestQueryContent_TextOnly(t *testing.T) {
 	res, err := opencodesdk.QueryContent(ctx, blocks,
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		skipIfCLIUnavailable(t, err)
@@ -59,6 +60,7 @@ func TestQueryStreamContent_IteratorVariant(t *testing.T) {
 		opencodesdk.PromptsFromSlice(prompts),
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	) {
 		if err != nil {
 			skipIfCLIUnavailable(t, err)
@@ -91,6 +93,7 @@ func TestWithPure_StartsCleanly(t *testing.T) {
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
 		opencodesdk.WithPure(),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)

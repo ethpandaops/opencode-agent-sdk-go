@@ -77,6 +77,7 @@ func main() {
 		opencodesdk.WithCwd(sandbox),
 		opencodesdk.WithCanUseTool(opencodesdk.AllowOnce),
 		opencodesdk.WithOnFsWrite(vfs.write),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		exitf("NewClient: %v", err)

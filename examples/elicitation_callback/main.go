@@ -39,6 +39,7 @@ func main() {
 	res, err := opencodesdk.Query(ctx, "Reply with one short sentence introducing yourself.",
 		opencodesdk.WithLogger(logger),
 		opencodesdk.WithCwd(cwd),
+		opencodesdk.WithModel("opencode/big-pickle"),
 		// Auto-accept form elicitations with an empty content map, log
 		// URL elicitations and decline them. A real UI would render
 		// the form from req.Form.RequestedSchema or open req.Url.Url

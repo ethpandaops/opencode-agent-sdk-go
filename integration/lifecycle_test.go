@@ -21,6 +21,7 @@ func TestLifecycle_StartClose(t *testing.T) {
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -50,6 +51,7 @@ func TestLifecycle_DoubleCloseIsNoop(t *testing.T) {
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -72,7 +74,10 @@ func TestLifecycle_DoubleCloseIsNoop(t *testing.T) {
 
 // TestLifecycle_CloseBeforeStart — Close before Start must not error.
 func TestLifecycle_CloseBeforeStart(t *testing.T) {
-	c, err := opencodesdk.NewClient(opencodesdk.WithLogger(testLogger(t)))
+	c, err := opencodesdk.NewClient(
+		opencodesdk.WithLogger(testLogger(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
+	)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -84,7 +89,10 @@ func TestLifecycle_CloseBeforeStart(t *testing.T) {
 
 // TestLifecycle_MethodsBeforeStart — ensureStarted gate returns ErrClientNotStarted.
 func TestLifecycle_MethodsBeforeStart(t *testing.T) {
-	c, err := opencodesdk.NewClient(opencodesdk.WithLogger(testLogger(t)))
+	c, err := opencodesdk.NewClient(
+		opencodesdk.WithLogger(testLogger(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
+	)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -104,6 +112,7 @@ func TestLifecycle_MethodsAfterClose(t *testing.T) {
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -134,6 +143,7 @@ func TestLifecycle_StartWithBogusCLIPath(t *testing.T) {
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCLIPath("/definitely/not/a/real/opencode-binary"),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -155,6 +165,7 @@ func TestLifecycle_DoubleStart_ReturnsErrClientAlreadyConnected(t *testing.T) {
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -182,6 +193,7 @@ func TestLifecycle_CancelAll_NoSessions_ReturnsNil(t *testing.T) {
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -209,6 +221,7 @@ func TestLifecycle_AvailableModes_ReturnsOpencodeDefaults(t *testing.T) {
 	c, err := opencodesdk.NewClient(
 		opencodesdk.WithLogger(testLogger(t)),
 		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -258,6 +271,7 @@ func TestLifecycle_RapidStartCloseCycle(t *testing.T) {
 		c, err := opencodesdk.NewClient(
 			opencodesdk.WithLogger(testLogger(t)),
 			opencodesdk.WithCwd(cwd),
+			opencodesdk.WithModel("opencode/big-pickle"),
 		)
 		if err != nil {
 			t.Fatalf("iteration %d: NewClient: %v", i, err)

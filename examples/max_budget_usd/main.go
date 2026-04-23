@@ -31,6 +31,7 @@ func main() {
 		opencodesdk.WithLogger(logger),
 		opencodesdk.WithCwd(cwd),
 		opencodesdk.WithMaxBudgetUSD(*budget),
+		opencodesdk.WithModel("opencode/big-pickle"),
 	)
 	if err != nil {
 		exitf("NewClient: %v", err)
