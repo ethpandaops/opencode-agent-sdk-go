@@ -78,10 +78,15 @@
 //   - persisted session-cost accounting via [CostTracker],
 //     [LoadSessionCost], and [SaveSessionCost] — snapshots land
 //     under $XDG_DATA_HOME/opencode/sdk/session-costs/.
-//   - client-less session metadata lookup via [StatSession] reading
-//     opencode's local SQLite store ($XDG_DATA_HOME/opencode/opencode.db);
-//     returns [SessionStat] without starting an `opencode acp`
-//     subprocess. Use [WithCwd] to scope by project directory.
+//   - client-less session metadata lookup via [StatSession] and
+//     [ListSessions] reading opencode's local SQLite store
+//     ($XDG_DATA_HOME/opencode/opencode.db); both return [SessionStat]
+//     without starting an `opencode acp` subprocess. Use [WithCwd] to
+//     scope by project directory. [ListSessions] returns rows ordered
+//     by UpdatedAt descending and excludes archived sessions by
+//     default — use [ListSessionsOptions] to opt in or to cap the
+//     row count. For an ACP-authoritative listing, use
+//     [Client.ListSessions] / [Client.IterSessions].
 //   - structured-output decoding via [DecodeStructuredOutput] and
 //     [DecodePromptResult], with an agent advisory schema via
 //     [WithOutputSchema].
@@ -121,6 +126,9 @@
 //     metric label across prompt-scoped instruments).
 //   - map-shaped CLI flags via [WithExtraArgs] alongside the slice
 //     form [WithCLIFlags].
+//   - [NopLogger] — a *slog.Logger that discards output, convenient
+//     for tests and for passing to [WithLogger] when the SDK should
+//     stay silent.
 //
 // # Quick start
 //
@@ -152,4 +160,29 @@
 // opinionated options (agent modes, unstable_* wrappers,
 // _meta.opencode parsers, HTTP MCP bridge port picker) are
 // opencode-shaped.
+//
+// # Intentional omissions vs sister SDKs
+//
+// Callers coming from claude-agent-sdk-go or codex-agent-sdk-go will
+// notice a handful of deliberate non-features; each tracks a semantic
+// gap in opencode itself rather than an oversight here.
+//
+//   - No WithSystemPrompt / WithSystemPromptFile. opencode 1.14.20's
+//     ACP surface does not accept per-session system prompts: its
+//     `session/new` advertises only `model` and `mode` as settable
+//     config options, and unknown fields are silently dropped.
+//     opencode resolves instructions server-side from `AGENTS.md` in
+//     the cwd and from agent definitions in `opencode.json`. Use
+//     [WithAgent] / [WithInitialMode] to pick an agent, and put
+//     prompt content in `AGENTS.md` or a custom agent definition.
+//   - No file-rewind / checkpoint API. opencode snapshots files
+//     internally (see its `snapshot/` dir) but exposes no ACP method
+//     to restore them; the `session.revert` column is TUI-owned.
+//   - No separate thinking-tokens knob. Reasoning effort is baked
+//     into the model id itself (e.g. `anthropic/claude-sonnet-4/high`)
+//     and surfaced through `_meta.opencode.availableVariants`;
+//     [WithEffort] is the complete control.
+//   - No logout / provider-toggle RPCs. Provider selection collapses
+//     into the `model` option; auth lifecycle lives in
+//     `opencode auth login` / `logout` at the CLI, not over ACP.
 package opencodesdk

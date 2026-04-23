@@ -55,6 +55,27 @@ func DatabasePath(opencodeDataDir string) string {
 	return filepath.Join(opencodeDataDir, DatabaseFile)
 }
 
+// selectColumns is the column list Lookup and List share; the
+// subquery-based message_count tails it so scanRow stays row-shape
+// agnostic.
+const selectColumns = `s.id,
+	s.project_id,
+	COALESCE(s.parent_id, ''),
+	s.slug,
+	s.directory,
+	s.title,
+	s.version,
+	COALESCE(s.share_url, ''),
+	s.summary_additions,
+	s.summary_deletions,
+	s.summary_files,
+	s.time_created,
+	s.time_updated,
+	s.time_compacting,
+	s.time_archived,
+	COALESCE(s.workspace_id, ''),
+	(SELECT COUNT(*) FROM message WHERE session_id = s.id) AS message_count`
+
 // Lookup reads the session row keyed by sessionID. When cwd is
 // non-empty, results are additionally filtered by exact
 // session.directory match.
@@ -63,12 +84,8 @@ func Lookup(ctx context.Context, dbPath, sessionID, cwd string) (*Row, error) {
 		return nil, err
 	}
 
-	if _, err := os.Stat(dbPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("database not found at %s: %w", dbPath, ErrNotFound)
-		}
-
-		return nil, fmt.Errorf("stat database: %w", err)
+	if err := checkDBExists(dbPath); err != nil {
+		return nil, err
 	}
 
 	db, err := openRO(dbPath)
@@ -77,26 +94,7 @@ func Lookup(ctx context.Context, dbPath, sessionID, cwd string) (*Row, error) {
 	}
 	defer db.Close()
 
-	query := `SELECT
-		s.id,
-		s.project_id,
-		COALESCE(s.parent_id, ''),
-		s.slug,
-		s.directory,
-		s.title,
-		s.version,
-		COALESCE(s.share_url, ''),
-		s.summary_additions,
-		s.summary_deletions,
-		s.summary_files,
-		s.time_created,
-		s.time_updated,
-		s.time_compacting,
-		s.time_archived,
-		COALESCE(s.workspace_id, ''),
-		(SELECT COUNT(*) FROM message WHERE session_id = s.id) AS message_count
-	FROM session AS s
-	WHERE s.id = ?`
+	query := "SELECT " + selectColumns + " FROM session AS s WHERE s.id = ?"
 
 	args := []any{sessionID}
 
@@ -116,6 +114,104 @@ func Lookup(ctx context.Context, dbPath, sessionID, cwd string) (*Row, error) {
 	}
 
 	return row, nil
+}
+
+// ListOptions controls the shape of a List result.
+type ListOptions struct {
+	// Cwd, when non-empty, restricts rows to those whose directory
+	// matches exactly.
+	Cwd string
+
+	// IncludeArchived, when false, excludes rows with a non-null
+	// time_archived.
+	IncludeArchived bool
+
+	// Limit caps the number of returned rows. Zero or negative means
+	// no limit.
+	Limit int
+}
+
+// List reads every session row from the local SQLite store, subject to
+// opts. Rows are ordered by time_updated DESC so the most recently
+// touched sessions come first. Missing database files yield
+// [ErrNotFound] to mirror Lookup's semantics.
+func List(ctx context.Context, dbPath string, opts ListOptions) ([]*Row, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if err := checkDBExists(dbPath); err != nil {
+		return nil, err
+	}
+
+	db, err := openRO(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	// All query fragments below are compile-time constants; user input
+	// only flows through parameter binding (args).
+	var (
+		query = "SELECT " + selectColumns + " FROM session AS s"
+		args  []any
+	)
+
+	switch {
+	case opts.Cwd != "" && !opts.IncludeArchived:
+		query += " WHERE s.directory = ? AND s.time_archived IS NULL"
+
+		args = append(args, opts.Cwd)
+	case opts.Cwd != "":
+		query += " WHERE s.directory = ?"
+
+		args = append(args, opts.Cwd)
+	case !opts.IncludeArchived:
+		query += " WHERE s.time_archived IS NULL"
+	}
+
+	query += " ORDER BY s.time_updated DESC"
+
+	if opts.Limit > 0 {
+		query += " LIMIT ?"
+
+		args = append(args, opts.Limit)
+	}
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*Row
+
+	for rows.Next() {
+		r, err := scanRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning session row: %w", err)
+		}
+
+		out = append(out, r)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating session rows: %w", err)
+	}
+
+	return out, nil
+}
+
+func checkDBExists(dbPath string) error {
+	if _, err := os.Stat(dbPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("database not found at %s: %w", dbPath, ErrNotFound)
+		}
+
+		return fmt.Errorf("stat database: %w", err)
+	}
+
+	return nil
 }
 
 func openRO(dbPath string) (*sql.DB, error) {

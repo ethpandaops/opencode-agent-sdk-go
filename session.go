@@ -111,8 +111,12 @@ type Session interface {
 	AvailableCommands() []acp.AvailableCommand
 
 	// CurrentVariant returns the opencode-specific model-variant state
-	// parsed from the session's _meta.opencode block, or nil if the
-	// session did not advertise a variant.
+	// for this session. If the SDK has observed a session/set_model
+	// response (via WithEffort's variant-resolution probe or an
+	// UnstableSetModel call) the returned value reflects that latest
+	// state; otherwise it falls back to parsing `_meta.opencode` from
+	// session creation. Returns nil when neither source carries
+	// variant state.
 	CurrentVariant() *VariantInfo
 
 	// Subscribe installs a set of typed session/update callbacks and

@@ -380,22 +380,30 @@ func (c *client) Close() error {
 		c.fireHookSessionEnd(context.Background(), id)
 	}
 
+	if c.subprocessSpan != nil {
+		c.subprocessSpan.End()
+		c.subprocessSpan = nil
+	}
+
+	// Shut down the subprocess BEFORE the MCP bridge. opencode holds a
+	// long-lived streamable-HTTP connection to the bridge, and
+	// http.Server.Shutdown blocks until all active connections close —
+	// so closing the bridge first stalls for the full 5s timeout waiting
+	// on opencode's still-open socket. Killing the subprocess first
+	// drops that connection, letting Shutdown return immediately.
+	var procErr error
+
+	if proc != nil {
+		procErr = proc.Close()
+	}
+
 	if c.bridge != nil {
 		if err := c.bridge.Close(context.Background()); err != nil {
 			c.opts.logger.Warn("mcp bridge close failed", slog.Any("error", err))
 		}
 	}
 
-	if c.subprocessSpan != nil {
-		c.subprocessSpan.End()
-		c.subprocessSpan = nil
-	}
-
-	if proc == nil {
-		return nil
-	}
-
-	return proc.Close()
+	return procErr
 }
 
 // Capabilities returns the agent capabilities negotiated during Start.
@@ -792,6 +800,15 @@ func (c *client) deregisterSession(id acp.SessionId) {
 	delete(c.sessions, id)
 	delete(c.pendingUpdates, id)
 	c.sessionsMu.Unlock()
+}
+
+// lookupSession returns the registered session for id, or nil if no
+// session with that id is currently tracked.
+func (c *client) lookupSession(id acp.SessionId) *session {
+	c.sessionsMu.Lock()
+	defer c.sessionsMu.Unlock()
+
+	return c.sessions[id]
 }
 
 // teardownSession is the rollback path for session creation: close the

@@ -24,6 +24,9 @@ for the protocol layer. This package adds:
 - `StatSession(ctx, sessionID, opts...)` — client-less metadata
   lookup against opencode's local SQLite store for a single session
   (returns `SessionStat` without starting a subprocess)
+- `ListSessions(ctx, ListSessionsOptions{}, opts...)` — client-less
+  enumeration of every session in that store, ordered newest-updated
+  first; excludes archived sessions by default
 - typed `session/update` subscribers (`Session.Subscribe` +
   `UpdateHandlers`) for AgentMessage, Plan, ToolCall, Mode, Usage, etc.
 - turn-complete and updates-dropped hooks
@@ -303,6 +306,15 @@ claude and codex sister SDKs:
   the session's recorded directory; `WithOpencodeHome(...)` overrides
   the XDG_DATA_HOME lookup. Returns `ErrSessionNotFound` when the row
   or the database file is missing.
+- **Session list (client-less)** —
+  `ListSessions(ctx, ListSessionsOptions{}, opts...)` reads every
+  session from the same SQLite store, ordered by `UpdatedAt`
+  descending. Archived sessions are excluded by default — set
+  `IncludeArchived: true` to opt in, or `Limit: N` to cap the row
+  count. `WithCwd` / `WithOpencodeHome` apply the same way as in
+  `StatSession`. For an ACP-authoritative listing (sessions opencode
+  itself can see for a given cwd), use `Client.ListSessions` /
+  `Client.IterSessions` instead.
 - **Structured output** — `DecodeStructuredOutput[T](result)` pulls a
   typed T from `QueryResult` (session-update meta first, JSON-fenced
   assistant text second). `WithOutputSchema(map[string]any)` advises
@@ -360,7 +372,8 @@ _, _ = opencodesdk.Query(ctx, prompt,
 opencodesdk.WithMeterProvider(myMeterProvider)
 ```
 
-See `examples/prometheus_metrics` for the full scrape-server setup.
+Wrap `WithPrometheusRegisterer(reg)` around a `promhttp.HandlerFor(reg,
+...)` server in your own process to scrape SDK metrics via `/metrics`.
 
 ## Examples
 
@@ -378,8 +391,6 @@ See [`examples/`](./examples/) for seven working programs:
 - `hooks` — typed lifecycle hooks via `WithHooks`
 - `elicitation` — a tool that asks the user to confirm via MCP
   elicitation through the loopback bridge
-- `prometheus_metrics` — expose SDK metrics via `/metrics` using
-  `WithPrometheusRegisterer`
 
 ## Architecture
 

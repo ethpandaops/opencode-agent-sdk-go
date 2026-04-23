@@ -43,6 +43,15 @@ type session struct {
 	currentModel string
 	currentMode  string
 
+	// resolvedVariant is the most recent VariantInfo observed from a
+	// session/set_model response (either the variant-resolution probe
+	// used by WithEffort or an UnstableSetModel call). session/new's
+	// _meta block reflects only opencode's default model at creation
+	// time, so after WithModel/WithEffort/UnstableSetModel the cached
+	// value here is the only accurate source of per-session variant
+	// state. Protected by mu.
+	resolvedVariant *VariantInfo
+
 	// toolCallStart tracks the start time of each in-flight tool call
 	// so RecordToolCall can emit a duration on the terminal update.
 	toolCallStart map[acp.ToolCallId]toolCallObservation
@@ -156,9 +165,27 @@ func (s *session) AvailableCommands() []acp.AvailableCommand {
 	return out
 }
 
-// CurrentVariant returns the opencode-specific variant info parsed from
-// the session's _meta.opencode block, or nil if absent.
+// CurrentVariant returns the opencode-specific variant info for this
+// session. Prefers the cached VariantInfo captured from the most
+// recent session/set_model response (probe or UnstableSetModel) over
+// the session/new _meta block, since opencode does not re-emit _meta
+// when the model changes mid-session. Returns nil when neither source
+// carries variant state.
 func (s *session) CurrentVariant() *VariantInfo {
+	s.mu.Lock()
+	cached := s.resolvedVariant
+	s.mu.Unlock()
+
+	if cached != nil {
+		clone := *cached
+
+		if len(cached.AvailableVariants) > 0 {
+			clone.AvailableVariants = append([]string(nil), cached.AvailableVariants...)
+		}
+
+		return &clone
+	}
+
 	if s.meta == nil {
 		return nil
 	}
@@ -169,6 +196,24 @@ func (s *session) CurrentVariant() *VariantInfo {
 	}
 
 	return info
+}
+
+// setResolvedVariant stores the freshest VariantInfo observed for this
+// session. Called after session/set_model responses so CurrentVariant
+// reflects the live variant state.
+func (s *session) setResolvedVariant(v *VariantInfo) {
+	if v == nil {
+		return
+	}
+
+	stored := *v
+	if len(v.AvailableVariants) > 0 {
+		stored.AvailableVariants = append([]string(nil), v.AvailableVariants...)
+	}
+
+	s.mu.Lock()
+	s.resolvedVariant = &stored
+	s.mu.Unlock()
 }
 
 // deliver pushes a notification into this session's updates channel.
@@ -202,6 +247,18 @@ func (s *session) deliver(n acp.SessionNotification) {
 	s.mu.Unlock()
 
 	dispatchSubscribers(context.Background(), subs, n)
+
+	// Re-acquire the lock for the non-blocking send so close() — which
+	// also holds s.mu around close(s.updates) — is serialised against
+	// us. Without this the channel could be closed between the s.closed
+	// check above and the send below, producing a send-on-closed-channel
+	// panic (caught as a data race by -race).
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return
+	}
 
 	select {
 	case s.updates <- n:

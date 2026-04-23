@@ -128,6 +128,69 @@ func StatSession(ctx context.Context, sessionID string, opts ...Option) (*Sessio
 	return rowToSessionStat(row), nil
 }
 
+// ListSessionsOptions tunes the behaviour of the top-level
+// [ListSessions]. The zero value lists every non-archived session in
+// opencode's local store, newest-updated first.
+type ListSessionsOptions struct {
+	// IncludeArchived, when true, returns sessions with a non-nil
+	// ArchivedAt alongside live ones. Default false.
+	IncludeArchived bool
+
+	// Limit, when > 0, caps the number of rows returned. Zero means
+	// no limit.
+	Limit int
+}
+
+// ListSessions enumerates opencode sessions from the local SQLite
+// store without starting an `opencode acp` subprocess. It mirrors the
+// client-less pattern established by [StatSession]: use [WithCwd] to
+// scope the listing to a project directory, [WithOpencodeHome] to
+// override the XDG_DATA_HOME lookup, and [ListSessionsOptions] for
+// archive / limit controls.
+//
+// Results are ordered by UpdatedAt descending (most-recent first) and
+// carry the same [SessionStat] shape that [StatSession] returns.
+//
+// Returns [ErrSessionNotFound] when the database file is missing —
+// consistent with [StatSession]. An empty slice with a nil error
+// means the database exists but holds no matching sessions.
+//
+// This function reads the same SQLite store used by opencode itself;
+// it does not go through the ACP `session/list` RPC. For a live,
+// agent-authoritative listing (including sessions the SDK cannot see
+// because the cwd differs), use [Client.ListSessions] or
+// [Client.IterSessions] instead.
+func ListSessions(ctx context.Context, listOpts ListSessionsOptions, opts ...Option) ([]SessionStat, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	o := apply(opts)
+
+	dataDir := resolveOpencodeDataDir(o.opencodeHome)
+	dbPath := sessiondb.DatabasePath(dataDir)
+
+	rows, err := sessiondb.List(ctx, dbPath, sessiondb.ListOptions{
+		Cwd:             o.cwd,
+		IncludeArchived: listOpts.IncludeArchived,
+		Limit:           listOpts.Limit,
+	})
+	if err != nil {
+		if errors.Is(err, sessiondb.ErrNotFound) {
+			return nil, fmt.Errorf("%w: opencode.db missing at %s", ErrSessionNotFound, dbPath)
+		}
+
+		return nil, err
+	}
+
+	out := make([]SessionStat, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, *rowToSessionStat(r))
+	}
+
+	return out, nil
+}
+
 func rowToSessionStat(r *sessiondb.Row) *SessionStat {
 	return &SessionStat{
 		SessionID:        r.ID,

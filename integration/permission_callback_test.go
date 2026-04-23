@@ -30,14 +30,20 @@ func TestPermissionCallback_WiredThrough(t *testing.T) {
 		return opencodesdk.AllowOnce(ctx, req)
 	}
 
+	cwd := tempCwdWithOpencodeConfig(t, map[string]any{
+		"permission": map[string]any{
+			"edit": "ask",
+			"bash": "ask",
+		},
+	})
+
 	err := opencodesdk.WithClient(ctx, func(c opencodesdk.Client) error {
-		sess, err := c.NewSession(ctx, opencodesdk.WithAgent("plan"))
+		sess, err := c.NewSession(ctx,
+			opencodesdk.WithModel("opencode/gpt-5-nano"),
+			opencodesdk.WithEffort(opencodesdk.EffortHigh),
+		)
 		if err != nil {
-			// "plan" mode might not exist; fall back to default.
-			sess, err = c.NewSession(ctx)
-			if err != nil {
-				return err
-			}
+			return err
 		}
 
 		go func() {
@@ -45,8 +51,6 @@ func TestPermissionCallback_WiredThrough(t *testing.T) {
 			}
 		}()
 
-		// Prompt that is likely to require a tool call with ask-type
-		// permission semantics.
 		_, promptErr := sess.Prompt(ctx, acp.TextBlock(
 			"Create a new file named hello.txt in the current directory containing the text 'hi'.",
 		))
@@ -54,7 +58,7 @@ func TestPermissionCallback_WiredThrough(t *testing.T) {
 		return promptErr
 	},
 		opencodesdk.WithLogger(testLogger(t)),
-		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithCwd(cwd),
 		opencodesdk.WithCanUseTool(approve),
 	)
 	if err != nil {
@@ -64,7 +68,7 @@ func TestPermissionCallback_WiredThrough(t *testing.T) {
 	}
 
 	if callbackHits.Load() == 0 {
-		t.Skip("permission callback was not invoked; opencode config likely allows tools automatically")
+		t.Skip("permission callback never fired this run (model likely refused the tool call); rerun to retry")
 	}
 
 	t.Logf("permission callback invoked %d time(s)", callbackHits.Load())
@@ -87,8 +91,17 @@ func TestPermissionCallback_FsWriteIntercepted(t *testing.T) {
 		return nil
 	}
 
+	cwd := tempCwdWithOpencodeConfig(t, map[string]any{
+		"permission": map[string]any{
+			"edit": "ask",
+		},
+	})
+
 	err := opencodesdk.WithClient(ctx, func(c opencodesdk.Client) error {
-		sess, err := c.NewSession(ctx)
+		sess, err := c.NewSession(ctx,
+			opencodesdk.WithModel("opencode/gpt-5-nano"),
+			opencodesdk.WithEffort(opencodesdk.EffortHigh),
+		)
 		if err != nil {
 			return err
 		}
@@ -105,7 +118,7 @@ func TestPermissionCallback_FsWriteIntercepted(t *testing.T) {
 		return promptErr
 	},
 		opencodesdk.WithLogger(testLogger(t)),
-		opencodesdk.WithCwd(tempCwd(t)),
+		opencodesdk.WithCwd(cwd),
 		opencodesdk.WithOnFsWrite(fsCB),
 		opencodesdk.WithCanUseTool(opencodesdk.AllowOnce),
 	)
@@ -116,7 +129,7 @@ func TestPermissionCallback_FsWriteIntercepted(t *testing.T) {
 	}
 
 	if fsHits.Load() == 0 {
-		t.Skip("fs/write_text_file was not delegated; opencode may have written directly")
+		t.Skip("fs/write_text_file callback never fired this run (model did not delegate the write); rerun to retry")
 	}
 
 	t.Logf("fs callback invoked %d time(s)", fsHits.Load())

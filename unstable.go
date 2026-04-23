@@ -169,12 +169,22 @@ func (c *client) UnstableSetModel(ctx context.Context, sessionID, modelID string
 		return err
 	}
 
-	_, err := c.transport.Conn().UnstableSetSessionModel(ctx, acp.UnstableSetSessionModelRequest{
+	resp, err := c.transport.Conn().UnstableSetSessionModel(ctx, acp.UnstableSetSessionModelRequest{
 		SessionId: acp.SessionId(sessionID),
 		ModelId:   acp.UnstableModelId(modelID),
 	})
 	if err != nil {
 		return fmt.Errorf("session/set_model: %w", wrapACPErr(err))
+	}
+
+	if s := c.lookupSession(acp.SessionId(sessionID)); s != nil {
+		if info, ok := OpencodeVariant(resp.Meta); ok {
+			if info.ModelId == "" {
+				info.ModelId = modelID
+			}
+
+			s.setResolvedVariant(info)
+		}
 	}
 
 	return nil

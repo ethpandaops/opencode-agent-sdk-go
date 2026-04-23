@@ -22,6 +22,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -64,9 +65,12 @@ func skipIfAuthRequired(t *testing.T, err error) {
 	}
 }
 
-// testLogger returns a slog.Logger that writes to stderr when the test
-// runs with -v, or discards output otherwise. Keeps `go test` output
-// quiet by default while retaining diagnostics on verbose runs.
+// testLogger returns a slog.Logger for integration tests. On verbose
+// runs it writes to stderr at WARN level — surfacing errors and
+// warnings without the INFO-level subprocess-lifecycle chatter
+// (`opencode CLI discovered`, `starting opencode acp`, `connection
+// closed`) that otherwise floods `go test -v` output. Silent on
+// non-verbose runs.
 func testLogger(t *testing.T) *slog.Logger {
 	t.Helper()
 
@@ -74,7 +78,7 @@ func testLogger(t *testing.T) *slog.Logger {
 		return slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 }
 
 // tempCwd returns an absolute path to a fresh temporary directory for
@@ -88,6 +92,27 @@ func tempCwd(t *testing.T) string {
 	}
 
 	return abs
+}
+
+// tempCwdWithOpencodeConfig is tempCwd plus a project-local opencode.json
+// written at the root. Lets tests force opencode's permission / tooling
+// routing into specific modes (e.g. permission.edit="ask") regardless of
+// the user's global opencode config.
+func tempCwdWithOpencodeConfig(t *testing.T, config map[string]any) string {
+	t.Helper()
+
+	cwd := tempCwd(t)
+
+	payload, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal opencode.json: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(cwd, "opencode.json"), payload, 0o600); err != nil {
+		t.Fatalf("write opencode.json: %v", err)
+	}
+
+	return cwd
 }
 
 // collectText accumulates AgentMessageChunk text from updates until

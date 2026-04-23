@@ -128,6 +128,8 @@ func (c *client) applyEffortOnSession(ctx context.Context, s *session, level Eff
 		return err
 	}
 
+	s.setResolvedVariant(info)
+
 	if len(info.AvailableVariants) == 0 {
 		s.logger.Debug("WithEffort no-op: model exposes no variants",
 			slog.String("model", modelID),
@@ -167,6 +169,10 @@ func (c *client) applyEffortOnSession(ctx context.Context, s *session, level Eff
 	s.mu.Lock()
 	s.currentModel = target
 	s.mu.Unlock()
+
+	applied := *info
+	applied.Variant = chosen
+	s.setResolvedVariant(&applied)
 
 	return nil
 }

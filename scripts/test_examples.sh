@@ -60,7 +60,9 @@ KEEP_GOING=false
 
 # Directories in examples/ that are not runnable Go examples (or that
 # intentionally block forever and are unsuitable for the verifier loop).
-SKIP_DIRS="plugins,prometheus_metrics"
+# Empty by default; add comma-separated names here if new unsuitable
+# examples land.
+SKIP_DIRS=""
 
 # Upper bound on output log content embedded in verifier prompt.
 VERIFY_MAX_CHARS=24000

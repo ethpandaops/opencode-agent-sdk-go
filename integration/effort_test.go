@@ -13,32 +13,34 @@ import (
 
 // TestEffort_VariantApplied creates a session with WithEffort(High) and
 // verifies the resulting model id carries a `/<variant>` suffix when
-// the model exposes one. Skips when the chosen base model has no
-// variants.
+// the model exposes one. Pins the model to opencode/gpt-5-nano (a free
+// variant-capable model) so the assertion path is reachable without
+// relying on the user's default model.
 func TestEffort_VariantApplied(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	err := opencodesdk.WithClient(ctx, func(c opencodesdk.Client) error {
-		sess, err := c.NewSession(ctx, opencodesdk.WithEffort(opencodesdk.EffortHigh))
+		sess, err := c.NewSession(ctx,
+			opencodesdk.WithModel("opencode/gpt-5-nano"),
+			opencodesdk.WithEffort(opencodesdk.EffortHigh),
+		)
 		if err != nil {
 			return err
 		}
 
 		variant := sess.CurrentVariant()
 		if variant == nil {
-			t.Skip("session did not advertise variant info; nothing to assert")
+			t.Fatal("CurrentVariant returned nil after WithModel + WithEffort")
 		}
 
 		if len(variant.AvailableVariants) == 0 {
-			t.Skip("model exposes no variants; WithEffort is a documented no-op")
+			t.Fatalf("opencode/gpt-5-nano advertised no variants: %+v", variant)
 		}
 
-		// CurrentVariant is sourced from the session's _meta block at
-		// creation time; the SDK's mid-session set_model probe doesn't
-		// re-publish meta. Inspect AvailableModels (current id may have
-		// been updated by applyEffortOnSession via session/set_model).
-		_ = variant
+		if variant.Variant == "" {
+			t.Fatalf("WithEffort(High) did not resolve to a variant: %+v", variant)
+		}
 
 		return nil
 	},
@@ -82,14 +84,16 @@ func TestRunCommand_AvailableCommands(t *testing.T) {
 			t.Skip("opencode did not advertise any AvailableCommands")
 		}
 
-		// Pick a safe command to invoke. Avoid commands that would
-		// modify state — `help` and `models` are typical safe picks
-		// when present; otherwise just log the discovered set.
+		// Pick a safe command to invoke. `compact` is an opencode
+		// built-in that compacts the current session — safe in this
+		// throwaway session and always present. `help` / `models` are
+		// accepted too for forward-compat in case future opencode
+		// versions advertise them.
 		safe := ""
 
 		for _, cmd := range commands {
 			lc := strings.ToLower(cmd.Name)
-			if lc == "help" || lc == "models" || lc == "model" {
+			if lc == "compact" || lc == "help" || lc == "models" || lc == "model" {
 				safe = cmd.Name
 
 				break

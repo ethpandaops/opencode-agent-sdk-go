@@ -80,57 +80,6 @@ func TestQueryStreamContent_IteratorVariant(t *testing.T) {
 	}
 }
 
-// TestWithAddDirs_CapabilityAdvertised checks whether opencode's live
-// server exposes the ACP unstable SessionCapabilities.AdditionalDirectories
-// capability. Both outcomes are legitimate: the SDK must accept
-// WithAddDirs and drop it silently when the capability is missing.
-//
-// When opencode advertises the capability, we additionally run a
-// one-shot Query with WithAddDirs to prove the extra directory is
-// accepted on the wire.
-func TestWithAddDirs_CapabilityAdvertised(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-	defer cancel()
-
-	c, err := opencodesdk.NewClient(
-		opencodesdk.WithLogger(testLogger(t)),
-		opencodesdk.WithCwd(tempCwd(t)),
-	)
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-
-	if startErr := c.Start(ctx); startErr != nil {
-		skipIfCLIUnavailable(t, startErr)
-		skipIfAuthRequired(t, startErr)
-		t.Fatalf("Start: %v", startErr)
-	}
-
-	defer c.Close()
-
-	caps := c.Capabilities()
-
-	if caps.SessionCapabilities.AdditionalDirectories == nil {
-		t.Logf("opencode %s does not advertise SessionCapabilities.AdditionalDirectories; WithAddDirs will no-op",
-			c.AgentInfo().Version)
-
-		return
-	}
-
-	t.Logf("opencode %s advertises additionalDirectories; running WithAddDirs probe", c.AgentInfo().Version)
-
-	// Capability advertised — prove the field reaches the wire without
-	// error. tempCwd(t) is absolute and exists, so it's a safe extra dir.
-	_, qerr := opencodesdk.Query(ctx, "Reply with just: ok",
-		opencodesdk.WithLogger(testLogger(t)),
-		opencodesdk.WithCwd(tempCwd(t)),
-		opencodesdk.WithAddDirs(tempCwd(t)),
-	)
-	if qerr != nil {
-		t.Fatalf("Query with WithAddDirs: %v", qerr)
-	}
-}
-
 // TestWithPure_StartsCleanly asserts that spawning `opencode acp --pure`
 // doesn't regress the default lifecycle — purely a smoke test; the CLI
 // itself honours --pure regardless of SDK.

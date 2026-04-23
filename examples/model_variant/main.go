@@ -91,11 +91,15 @@ func main() {
 		return
 	}
 
-	// The SDK's CurrentVariant() is cached at session creation; after
-	// an UnstableSetModel round-trip you'd typically observe the change
-	// through a SessionConfigOptionUpdate on Session.Updates(). For this
-	// demo we just log success — the next prompt on the session runs
-	// under the new variant.
+	// CurrentVariant() refreshes from the session/set_model response,
+	// so after UnstableSetModel it reflects the newly applied variant.
+	if updated := sess.CurrentVariant(); updated != nil {
+		fmt.Printf("switched %s to variant %q (CurrentVariant now reports %q).\n",
+			variant.ModelId, alt, updated.Variant)
+
+		return
+	}
+
 	fmt.Printf("switched %s to variant %q.\n", variant.ModelId, alt)
 }
 

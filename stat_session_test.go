@@ -401,3 +401,204 @@ func TestStatSession_NilReceiverArchived(t *testing.T) {
 		t.Errorf("Archived on nil receiver: want false")
 	}
 }
+
+func TestListSessions_OrderedByUpdatedDesc(t *testing.T) {
+	t.Parallel()
+
+	home := setupTestDB(t)
+
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).UnixMilli()
+	t1 := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC).UnixMilli()
+	t2 := time.Date(2026, 1, 3, 12, 0, 0, 0, time.UTC).UnixMilli()
+
+	// Insert three sessions with increasing UpdatedAt.
+	insertSessionRow(t, home,
+		"ses_old", "global", nil, "old", "/p", "Oldest", "1.14.20", nil,
+		nil, nil, nil, nil, nil, nil,
+		t0, t0, nil, nil, nil,
+	)
+	insertSessionRow(t, home,
+		"ses_mid", "global", nil, "mid", "/p", "Middle", "1.14.20", nil,
+		nil, nil, nil, nil, nil, nil,
+		t0, t1, nil, nil, nil,
+	)
+	insertSessionRow(t, home,
+		"ses_new", "global", nil, "new", "/p", "Newest", "1.14.20", nil,
+		nil, nil, nil, nil, nil, nil,
+		t0, t2, nil, nil, nil,
+	)
+
+	got, err := ListSessions(context.Background(), ListSessionsOptions{},
+		WithOpencodeHome(home),
+	)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+
+	want := []string{"ses_new", "ses_mid", "ses_old"}
+	if len(got) != len(want) {
+		t.Fatalf("len: want %d, got %d", len(want), len(got))
+	}
+
+	for i, id := range want {
+		if got[i].SessionID != id {
+			t.Errorf("row %d: want %s, got %s", i, id, got[i].SessionID)
+		}
+	}
+}
+
+func TestListSessions_ExcludesArchivedByDefault(t *testing.T) {
+	t.Parallel()
+
+	home := setupTestDB(t)
+	now := time.Now().UnixMilli()
+	archived := now - 3600_000
+
+	insertSessionRow(t, home,
+		"ses_live", "global", nil, "live", "/p", "Live", "1.14.20", nil,
+		nil, nil, nil, nil, nil, nil,
+		now, now, nil, nil, nil,
+	)
+	insertSessionRow(t, home,
+		"ses_arch", "global", nil, "arch", "/p", "Archived", "1.14.20", nil,
+		nil, nil, nil, nil, nil, nil,
+		now, now, nil, archived, nil,
+	)
+
+	got, err := ListSessions(context.Background(), ListSessionsOptions{},
+		WithOpencodeHome(home),
+	)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+
+	if len(got) != 1 || got[0].SessionID != "ses_live" {
+		t.Fatalf("default: want only ses_live, got %+v", got)
+	}
+
+	got, err = ListSessions(context.Background(),
+		ListSessionsOptions{IncludeArchived: true},
+		WithOpencodeHome(home),
+	)
+	if err != nil {
+		t.Fatalf("ListSessions (include archived): %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("include archived: want 2 rows, got %d", len(got))
+	}
+}
+
+func TestListSessions_CwdScoping(t *testing.T) {
+	t.Parallel()
+
+	home := setupTestDB(t)
+	now := time.Now().UnixMilli()
+
+	insertSessionRow(t, home,
+		"ses_a", "global", nil, "a", "/work/a", "A", "1.14.20", nil,
+		nil, nil, nil, nil, nil, nil,
+		now, now, nil, nil, nil,
+	)
+	insertSessionRow(t, home,
+		"ses_b", "global", nil, "b", "/work/b", "B", "1.14.20", nil,
+		nil, nil, nil, nil, nil, nil,
+		now, now, nil, nil, nil,
+	)
+
+	got, err := ListSessions(context.Background(), ListSessionsOptions{},
+		WithOpencodeHome(home),
+		WithCwd("/work/a"),
+	)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+
+	if len(got) != 1 || got[0].SessionID != "ses_a" {
+		t.Fatalf("cwd scoping: want only ses_a, got %+v", got)
+	}
+}
+
+func TestListSessions_LimitHonored(t *testing.T) {
+	t.Parallel()
+
+	home := setupTestDB(t)
+	now := time.Now().UnixMilli()
+
+	for i, id := range []string{"ses_1", "ses_2", "ses_3"} {
+		insertSessionRow(t, home,
+			id, "global", nil, id, "/p", id, "1.14.20", nil,
+			nil, nil, nil, nil, nil, nil,
+			now, now+int64(i), nil, nil, nil,
+		)
+	}
+
+	got, err := ListSessions(context.Background(),
+		ListSessionsOptions{Limit: 2},
+		WithOpencodeHome(home),
+	)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("limit: want 2 rows, got %d", len(got))
+	}
+}
+
+func TestListSessions_NoDatabaseFile(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+
+	_, err := ListSessions(context.Background(), ListSessionsOptions{},
+		WithOpencodeHome(home),
+	)
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("want ErrSessionNotFound, got %v", err)
+	}
+}
+
+func TestListSessions_EmptyDBReturnsEmptySlice(t *testing.T) {
+	t.Parallel()
+
+	home := setupTestDB(t)
+
+	got, err := ListSessions(context.Background(), ListSessionsOptions{},
+		WithOpencodeHome(home),
+	)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+
+	if len(got) != 0 {
+		t.Errorf("want empty slice, got %d rows", len(got))
+	}
+}
+
+func TestListSessions_ContextCancelled(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ListSessions(ctx, ListSessionsOptions{})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("want context.Canceled, got %v", err)
+	}
+}
+
+func TestNopLogger_Discards(t *testing.T) {
+	t.Parallel()
+
+	l := NopLogger()
+	if l == nil {
+		t.Fatal("NopLogger returned nil")
+	}
+
+	// Smoke-test: logging at every level must not panic or write.
+	l.Debug("debug")
+	l.Info("info")
+	l.Warn("warn")
+	l.Error("error")
+}

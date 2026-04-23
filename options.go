@@ -366,7 +366,7 @@ func WithTracerProvider(tp trace.TracerProvider) Option {
 //
 // The registered metrics are scraped in OpenMetrics format with
 // whatever HTTP handler the caller wires up against reg (typically
-// `promhttp.HandlerFor(reg, ...)`). See examples/prometheus_metrics.
+// `promhttp.HandlerFor(reg, ...)`).
 func WithPrometheusRegisterer(reg prometheus.Registerer) Option {
 	return func(o *options) { o.promRegisterer = reg }
 }

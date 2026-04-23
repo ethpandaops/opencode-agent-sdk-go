@@ -41,13 +41,9 @@ run `opencode auth login` out of band.
 | `effort` | Higher-level `WithEffort(EffortLow/Medium/High/Max)` that maps an abstract reasoning-depth enum to whatever variant the chosen model exposes (with sensible fallback). Sister to `model_variant` but doesn't require the caller to know the exact variant strings. |
 | `max_turns` | `WithMaxTurns(n)` caps the number of assistant messages observed per session and calls `Session.Cancel` once the cap is crossed. Useful as a backstop against runaway agent loops. |
 | `run_command` | `Session.RunCommand(name, args...)` invokes one of opencode's slash commands (advertised via `Session.AvailableCommands()`) as a prompt turn — sugar for sending the command as a leading-slash text block. |
-| `prometheus_metrics` | Wire SDK metrics to a Prometheus registry via the built-in `WithPrometheusRegisterer` sugar and serve `/metrics` on `localhost:9090`. |
-| `contrib_prometheus` | Build a Prometheus-backed OTel `MeterProvider` explicitly via `contrib/prometheus.NewMeterProvider` and pass it to `WithMeterProvider`. Use when you want to share the same provider with other OTel-instrumented code. Serves `/metrics` on `localhost:9091`. |
 | `elicitation_callback` | Handle agent-initiated `elicitation/create` requests via `WithOnElicitation` and `WithOnElicitationComplete`. Forward-compatible: opencode 1.14.20 doesn't emit elicitation/create yet, so the callback is wired but dormant until a future ACP agent uses it. |
 | `cost_tracker` | Feed a `CostTracker` from `UsageUpdate` notifications and persist the snapshot under `$XDG_DATA_HOME/opencode/sdk/session-costs/`. |
 | `max_budget_usd` | Cap total USD spend with `WithMaxBudgetUSD`; the SDK auto-subscribes each session and calls `Session.Cancel` when the budget trips. `Client.BudgetTracker()` exposes the running snapshot. |
-| `load_history` | Rehydrate a session with `Client.LoadSessionHistory` and inspect the replayed messages / raw notifications / final usage as a typed `SessionHistory`. |
-| `stat_session` | Client-less metadata lookup via `StatSession`, reading opencode's local SQLite store at `$XDG_DATA_HOME/opencode/opencode.db`. No subprocess is spawned. |
 | `set_config_option` | List `Session.InitialConfigOptions()` and drive `Session.SetConfigOption` / `SetConfigOptionBool` for arbitrary config ids beyond `model` / `mode`. |
 
 For one-shot interactions, [`opencodesdk.Query`](../query.go) and
