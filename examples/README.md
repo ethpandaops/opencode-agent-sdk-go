@@ -17,6 +17,7 @@ run `opencode auth login` out of band.
 | `external_mcp` | Attach an external stdio MCP server via `WithMCPServers`. Defaults to `npx -y @modelcontextprotocol/server-everything`; override with `EXTERNAL_MCP_COMMAND`. |
 | `session_list` | Enumerate prior sessions scoped to the working directory. |
 | `permission_callback` | Interactively approve/deny tool calls via stdin. Requires `"permission": {"edit": "ask"}` in `~/.config/opencode/config.json` to actually trigger prompts — the default `build` agent auto-allows everything. Runs in an isolated tempdir. |
+| `allowed_tools` | `WithAllowedTools` / `WithDisallowedTools` auto-approve and auto-reject named tools without invoking `WithCanUseTool`. Names match `acp.ToolCall.Title` (e.g. `edit`, `bash`, `write`). Writes a local `opencode.json` so the ask path is exercised. |
 | `fs_intercept` | Override `fs/write_text_file` delegations with `WithOnFsWrite` to capture writes in memory instead of hitting disk. Same permission prerequisite as above. Runs in an isolated tempdir. |
 | `plan_mode` | Select opencode's plan mode via `WithInitialMode(ModePlan)` to demonstrate its read-only posture — plan's ruleset denies edits inline (it does NOT route through `session/request_permission`). Also lists `Session.AvailableModes()`. |
 | `query_stream` | Run a list of prompts against a single long-lived session via `QueryStream` and iterate results with range-over-func. |

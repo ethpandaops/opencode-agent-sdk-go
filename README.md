@@ -199,6 +199,41 @@ Closures are live: reach into DB handles, config, whatever the host
 process has. That's the entire reason to embed an agent inside a Go
 program versus shelling out.
 
+## Tool restrictions & system prompts
+
+opencode's ACP surface deliberately exposes very few session-scoped
+knobs: only `model` and `mode` are configurable at runtime
+(`Session.SetConfigOption`). Two things the sister SDKs put on the
+session are _not_ on opencode's wire:
+
+1. **Per-session system prompts.** `session/new` silently ignores a
+   `systemPrompt` field. The canonical place for a custom system
+   prompt is a custom agent defined in `opencode.json` (`prompt:`
+   field). Every agent shows up in `modes.availableModes`, so you can
+   select it at session start with `opencodesdk.WithAgent("my-agent")`
+   or switch to it mid-session with `Session.SetMode(ctx, "my-agent")`.
+
+2. **Per-session tool allow/deny lists.** The global permission
+   ruleset in `opencode.json` (`permission: { edit: "ask" }`) is the
+   only wire-level knob; custom agents can narrow tools further via
+   their own `tools:` whitelist. On top of that the SDK exposes two
+   convenience filters that short-circuit the permission callback:
+
+   ```go
+   opencodesdk.WithAllowedTools("edit", "write"), // auto-approve
+   opencodesdk.WithDisallowedTools("bash"),        // auto-reject
+   opencodesdk.WithCanUseTool(myCallback),         // fallback for anything else
+   ```
+
+   Names match `acp.ToolCall.Title` (the opencode tool name, e.g.
+   "edit", "bash", "read", "write"). These only fire when opencode's
+   own rules resolve to `"ask"` — see `WithCanUseTool` for the
+   `opencode.json` snippet that enables the ask path.
+
+See [`examples/allowed_tools`](./examples/allowed_tools) for a runnable
+version that sets up the `ask`-mode config and exercises all three
+layers together.
+
 ## Options overview
 
 | Option | Purpose |
@@ -221,6 +256,8 @@ program versus shelling out.
 | `WithMCPServers(servers...)` | external MCP servers |
 | `WithSDKTools(tools...)` | in-process tools via the bridge |
 | `WithCanUseTool(cb)` | permission-prompt callback |
+| `WithAllowedTools(names...)` | auto-approve named tools; skips `WithCanUseTool` |
+| `WithDisallowedTools(names...)` | auto-reject named tools; skips `WithCanUseTool` |
 | `WithOnFsWrite(cb)` | intercept `fs/write_text_file` |
 | `WithOnElicitation(cb)` | handle agent-initiated `elicitation/create` (ACP unstable); opencode 1.14.20 doesn't emit it yet — forward-compat stub |
 | `WithOnElicitationComplete(cb)` | observe `elicitation/complete` notifications for URL-mode elicitation |

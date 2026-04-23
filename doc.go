@@ -45,7 +45,10 @@
 //     [ErrCapabilityUnavailable].
 //   - permission and filesystem callbacks surfaced via WithCanUseTool
 //     and WithOnFsWrite, plus cwd-scoped write enforcement
-//     (WithStrictCwdBoundary).
+//     (WithStrictCwdBoundary). [WithAllowedTools] and
+//     [WithDisallowedTools] layer auto-approve / auto-reject filters on
+//     top of [WithCanUseTool], matching on the opencode tool name
+//     (acp.ToolCall.Title).
 //   - agent-initiated elicitation handlers via
 //     [WithOnElicitation] and [WithOnElicitationComplete]
 //     (forward-compat for ACP's unstable elicitation/create;

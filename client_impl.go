@@ -130,7 +130,7 @@ func (c *client) Start(ctx context.Context) error {
 		Logger: c.opts.logger,
 		Callbacks: handlers.Callbacks{
 			SessionUpdate:       c.routeSessionUpdate,
-			Permission:          c.instrumentedPermission(c.opts.canUseTool),
+			Permission:          c.instrumentedPermission(composeCanUseTool(c.opts.allowedTools, c.opts.disallowedTools, c.opts.canUseTool)),
 			FsWrite:             c.instrumentedFsWrite(c.opts.onFsWrite),
 			Elicitation:         c.instrumentedElicitation(c.opts.onElicitation),
 			ElicitationComplete: wrapElicitationComplete(c.opts.onElicitationComplete),
@@ -1211,7 +1211,10 @@ func (c *client) resolveAdditionalDirs(ctx context.Context, o *options) []string
 	}
 
 	if c.agentCaps.SessionCapabilities.AdditionalDirectories == nil {
-		c.opts.logger.WarnContext(ctx, "WithAddDirs ignored: agent does not advertise additionalDirectories capability",
+		// opencode does not currently advertise this capability, so
+		// every session would log a warning here. Keep the signal at
+		// debug until opencode lights it up.
+		c.opts.logger.DebugContext(ctx, "WithAddDirs ignored: agent does not advertise additionalDirectories capability",
 			slog.Int("count", len(o.additionalDirectories)),
 		)
 

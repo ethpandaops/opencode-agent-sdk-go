@@ -54,6 +54,14 @@ type options struct {
 	// Per-session buffering for the updates channel. Zero → default (128).
 	updatesBuffer int
 
+	// Tool filters applied on top of canUseTool. allowedTools is a set
+	// of tool names (matched against acp.ToolCall.Title) that are
+	// auto-approved; disallowedTools is auto-rejected. disallowedTools
+	// wins ties. Tools not named in either list fall through to
+	// canUseTool (or the dispatcher default).
+	allowedTools    []string
+	disallowedTools []string
+
 	// Callbacks
 	canUseTool            PermissionCallback
 	onFsWrite             FsWriteCallback
@@ -184,6 +192,13 @@ func WithUser(user string) Option {
 // WithEnv provides additional environment variables for the opencode
 // subprocess. The SDK inherits os.Environ() by default and overlays
 // these values (later entries win).
+//
+// Useful opencode env toggles:
+//
+//   - OPENCODE_ENABLE_QUESTION_TOOL=1 enables opencode's interactive
+//     "question" tool (disabled by default). When set, the agent may
+//     call the tool to route free-form questions back to the client,
+//     which the SDK surfaces through session/request_permission.
 func WithEnv(env map[string]string) Option {
 	return func(o *options) {
 		if o.env == nil {
