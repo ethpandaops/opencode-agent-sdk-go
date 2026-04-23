@@ -22,6 +22,8 @@ Opencode-focused Go SDK built on top of
 - Stateful sessions: `NewClient(opts...)` + `Client` + `Session`
 - Lifecycle helper: `WithClient(ctx, fn, opts...) error`
 - Session listing: `Client.ListSessions(ctx, cursor)`
+- Client-less session stat: `StatSession(ctx, sessionID, opts...)`
+  reads opencode's local SQLite (`$XDG_DATA_HOME/opencode/opencode.db`)
 - opencode unstable: `Client.ForkSession`, `Client.ResumeSession`,
   `Client.UnstableSetModel`
 

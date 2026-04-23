@@ -23,6 +23,8 @@ None. opencode has one ACP mode. `Query(...)`, `QueryStream(...)`, and
   enforcement)
 - `internal/mcp/bridge/`: loopback HTTP MCP server for `WithSDKTools`
 - `internal/observability/`: OTel spans + metrics under `opencodesdk.*`
+- `internal/session/`: read-only SQLite reader for opencode's local
+  session store; backs the public `StatSession` helper
 
 Typed wrappers for opencode's unstable methods
 (`unstable_forkSession`, `unstable_resumeSession`,
@@ -33,7 +35,9 @@ in the top-level `unstable.go`.
 
 opencode owns it. Sessions persist in `$XDG_DATA_HOME/opencode/opencode.db`
 (SQLite) and survive `opencode acp` restarts. Listing is via
-`session/list`; no client-side session metadata store.
+`session/list` (the ACP RPC); `StatSession` reads the same SQLite
+store directly in read-only mode for client-less metadata lookup.
+No mutable client-side session metadata store — reads only.
 
 ## Change impact guidance
 

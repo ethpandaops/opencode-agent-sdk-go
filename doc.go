@@ -75,6 +75,10 @@
 //   - persisted session-cost accounting via [CostTracker],
 //     [LoadSessionCost], and [SaveSessionCost] — snapshots land
 //     under $XDG_DATA_HOME/opencode/sdk/session-costs/.
+//   - client-less session metadata lookup via [StatSession] reading
+//     opencode's local SQLite store ($XDG_DATA_HOME/opencode/opencode.db);
+//     returns [SessionStat] without starting an `opencode acp`
+//     subprocess. Use [WithCwd] to scope by project directory.
 //   - structured-output decoding via [DecodeStructuredOutput] and
 //     [DecodePromptResult], with an agent advisory schema via
 //     [WithOutputSchema].

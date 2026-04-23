@@ -94,6 +94,11 @@ var (
 	// in-flight RPC able to complete. See TransportError for the typed
 	// companion carrying the underlying cause.
 	ErrTransport = errors.New("opencodesdk: transport closed unexpectedly")
+
+	// ErrSessionNotFound is returned by StatSession when the requested
+	// session ID does not exist in opencode's local database (or the
+	// database file is missing entirely).
+	ErrSessionNotFound = errors.New("opencodesdk: session not found")
 )
 
 // RequestError is the typed JSON-RPC error surface exposed to callers. It

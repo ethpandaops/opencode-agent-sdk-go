@@ -21,6 +21,8 @@ Stable public API. Opencode-focused Go SDK built on
 - Stateful client: `NewClient(opts...) (Client, error)` + `Session`
 - Lifecycle helper: `WithClient(ctx, fn, opts...) error`
 - Session enumeration: `Client.ListSessions(ctx, cursor)`
+- Client-less session stat: `StatSession(ctx, sessionID, opts...)` reads
+  opencode's local SQLite at `$XDG_DATA_HOME/opencode/opencode.db`
 - opencode unstable: `Client.ForkSession`, `Client.ResumeSession`,
   `Client.UnstableSetModel`, `Session.CurrentVariant`
 
@@ -36,7 +38,9 @@ Stable public API. Opencode-focused Go SDK built on
 - `permissions.go`: `PermissionCallback`, helpers (`AllowOnce` etc.)
 - `auth.go`: `TerminalAuthInstructions` + `TerminalAuthLaunch`
 - `errors.go`: typed and sentinel errors (incl. `ErrAuthRequired`,
-  `ErrCancelled`, `ErrCLINotFound`)
+  `ErrCancelled`, `ErrCLINotFound`, `ErrSessionNotFound`)
+- `stat_session.go`: `StatSession` + `SessionStat` (client-less
+  SQLite read; internal reader at `internal/session/`)
 
 ## Documentation Sync Expectations
 

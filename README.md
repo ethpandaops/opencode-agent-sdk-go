@@ -21,6 +21,9 @@ for the protocol layer. This package adds:
   opencode's replayed `session/update` notifications into a typed
   `SessionHistory` (raw notifications, coalesced messages, last
   usage)
+- `StatSession(ctx, sessionID, opts...)` — client-less metadata
+  lookup against opencode's local SQLite store for a single session
+  (returns `SessionStat` without starting a subprocess)
 - typed `session/update` subscribers (`Session.Subscribe` +
   `UpdateHandlers`) for AgentMessage, Plan, ToolCall, Mode, Usage, etc.
 - turn-complete and updates-dropped hooks
@@ -254,6 +257,15 @@ claude and codex sister SDKs:
   cost and token usage from `UsageUpdate` notifications.
   `LoadSessionCost` / `SaveSessionCost` persist snapshots to
   `$XDG_DATA_HOME/opencode/sdk/session-costs/<id>.json`.
+- **Session stat (client-less)** — `StatSession(ctx, sessionID, opts...)`
+  reads metadata for a single session directly from opencode's local
+  SQLite store at `$XDG_DATA_HOME/opencode/opencode.db`. Returns a
+  `SessionStat` with project / slug / title / version / timestamps /
+  archived state / message count without starting an `opencode acp`
+  subprocess. Use `WithCwd(path)` to additionally scope the lookup by
+  the session's recorded directory; `WithOpencodeHome(...)` overrides
+  the XDG_DATA_HOME lookup. Returns `ErrSessionNotFound` when the row
+  or the database file is missing.
 - **Structured output** — `DecodeStructuredOutput[T](result)` pulls a
   typed T from `QueryResult` (session-update meta first, JSON-fenced
   assistant text second). `WithOutputSchema(map[string]any)` advises

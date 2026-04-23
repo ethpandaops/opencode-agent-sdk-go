@@ -46,6 +46,7 @@ run `opencode auth login` out of band.
 | `cost_tracker` | Feed a `CostTracker` from `UsageUpdate` notifications and persist the snapshot under `$XDG_DATA_HOME/opencode/sdk/session-costs/`. |
 | `max_budget_usd` | Cap total USD spend with `WithMaxBudgetUSD`; the SDK auto-subscribes each session and calls `Session.Cancel` when the budget trips. `Client.BudgetTracker()` exposes the running snapshot. |
 | `load_history` | Rehydrate a session with `Client.LoadSessionHistory` and inspect the replayed messages / raw notifications / final usage as a typed `SessionHistory`. |
+| `stat_session` | Client-less metadata lookup via `StatSession`, reading opencode's local SQLite store at `$XDG_DATA_HOME/opencode/opencode.db`. No subprocess is spawned. |
 | `set_config_option` | List `Session.InitialConfigOptions()` and drive `Session.SetConfigOption` / `SetConfigOptionBool` for arbitrary config ids beyond `model` / `mode`. |
 
 For one-shot interactions, [`opencodesdk.Query`](../query.go) and
