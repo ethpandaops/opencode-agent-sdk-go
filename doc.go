@@ -96,6 +96,11 @@
 //     jitter for rate-limit / overload / transient-connection errors.
 //   - one-shot model discovery via [ListModels] without hand-rolling
 //     a session loop.
+//   - one-shot model-capability discovery via [ListModelCapabilities]
+//     ([reasoning], [tool_call], [attachment], [context]/[output]
+//     limits, …) — spawns a throw-away `opencode serve` subprocess
+//     and fetches /config/providers, since ACP's catalogue does not
+//     carry capability flags.
 //   - subprocess data-dir isolation via [WithOpencodeHome].
 //   - Prometheus metrics via [WithPrometheusRegisterer] (OTel
 //     Prometheus exporter under the hood).

@@ -326,6 +326,14 @@ claude and codex sister SDKs:
 - **Model catalogue** — `ListModels(ctx, opts...)` returns every
   model opencode advertises for the configured cwd without writing
   a full session loop.
+- **Model capabilities** — `ListModelCapabilities(ctx, opts...)`
+  returns per-model capability flags (`Reasoning`, `Toolcall`,
+  `Attachment`, `Interleaved`, input/output modalities, context/output
+  limits) keyed by `"<providerID>/<modelID>"`. Spawns a short-lived
+  `opencode serve` subprocess and calls `/config/providers` — ACP's
+  model catalogue does not carry these flags, so a custom provider's
+  `reasoning: true` in `opencode.json` is only visible through this
+  helper.
 - **Data-dir override** — `WithOpencodeHome(path)` sets
   `XDG_DATA_HOME` for the subprocess and for cost-snapshot
   persistence — convenient for tests and multi-env setups.
