@@ -2,7 +2,6 @@ package opencodesdk
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -14,7 +13,9 @@ func TestStructuredOutputCapture_StoreDrain(t *testing.T) {
 		t.Fatalf("drain on fresh capture = %v, want nil", got)
 	}
 
-	c.store(map[string]any{"answer": "4"})
+	if n := c.store(map[string]any{"answer": "4"}); n != 1 {
+		t.Fatalf("first store returned calls = %d, want 1", n)
+	}
 
 	got := c.drain()
 	if got == nil || got["answer"] != "4" {
@@ -29,16 +30,32 @@ func TestStructuredOutputCapture_StoreDrain(t *testing.T) {
 func TestStructuredOutputCapture_LatestWins(t *testing.T) {
 	c := newStructuredOutputCapture()
 
-	c.store(map[string]any{"v": 1})
-	c.store(map[string]any{"v": 2})
+	if n := c.store(map[string]any{"v": 1}); n != 1 {
+		t.Fatalf("first store returned calls = %d, want 1", n)
+	}
+
+	if n := c.store(map[string]any{"v": 2}); n != 2 {
+		t.Fatalf("second store returned calls = %d, want 2 (counter persists until drain)", n)
+	}
 
 	got := c.drain()
 	if got == nil || got["v"] != 2 {
 		t.Fatalf("drain = %v, want v=2 (latest wins)", got)
 	}
+
+	// Drain also resets the counter so the next turn starts fresh.
+	if n := c.store(map[string]any{"v": 3}); n != 1 {
+		t.Fatalf("store after drain returned calls = %d, want 1 (drain must reset)", n)
+	}
 }
 
-func TestStructuredOutputBridgeDef_CapturesAndEchoes(t *testing.T) {
+// TestStructuredOutputBridgeDef_CapturesAndAcknowledges exercises the
+// happy path: the handler stores the caller's payload, returns a
+// short acknowledgement (NOT the JSON-echoed input that earlier
+// versions sent back — that loop-trapped weaker models like
+// qwen3.6-class into re-calling the tool forever), and exposes the
+// payload via out.Structured for programmatic consumers.
+func TestStructuredOutputBridgeDef_CapturesAndAcknowledges(t *testing.T) {
 	schema := map[string]any{
 		"type": schemaTypeObject,
 		"properties": map[string]any{
@@ -72,13 +89,63 @@ func TestStructuredOutputBridgeDef_CapturesAndEchoes(t *testing.T) {
 		t.Errorf("capture did not record input: %v", got)
 	}
 
-	var decoded map[string]any
-	if err := json.Unmarshal([]byte(out.Text), &decoded); err != nil {
-		t.Fatalf("unmarshal out.Text: %v", err)
+	if out.Text != structuredOutputCapturedAck {
+		t.Errorf("out.Text = %q, want capture acknowledgement (no input echo)", out.Text)
 	}
 
-	if decoded["answer"] != "4" {
-		t.Errorf("out.Text answer = %v, want 4", decoded["answer"])
+	if !strings.Contains(out.Text, "End your turn") {
+		t.Errorf("out.Text missing end-turn directive: %q", out.Text)
+	}
+
+	structured, ok := out.Structured.(map[string]any)
+	if !ok {
+		t.Fatalf("out.Structured = %T, want map[string]any", out.Structured)
+	}
+
+	if structured["answer"] != "4" {
+		t.Errorf("out.Structured.answer = %v, want 4", structured["answer"])
+	}
+}
+
+// TestStructuredOutputBridgeDef_RepeatCallReturnsDistinctAck asserts
+// the 2nd+ call within a single turn gets a differently-worded
+// acknowledgement so the model can recover from a wrong retry loop
+// instead of repeatedly seeing a happy-path message. Does NOT set
+// IsError — flipping that on a successful capture would trigger
+// error-handling prompt paths on some harnesses.
+func TestStructuredOutputBridgeDef_RepeatCallReturnsDistinctAck(t *testing.T) {
+	schema := map[string]any{"type": schemaTypeObject}
+	capture := newStructuredOutputCapture()
+	def := structuredOutputBridgeDef(schema, capture, nil)
+
+	first, err := def.Handler(t.Context(), map[string]any{"answer": "4"})
+	if err != nil {
+		t.Fatalf("first handler: %v", err)
+	}
+
+	if first.Text != structuredOutputCapturedAck {
+		t.Errorf("first call text = %q, want captured ack", first.Text)
+	}
+
+	if first.IsError {
+		t.Errorf("first call IsError = true, want false")
+	}
+
+	second, err := def.Handler(t.Context(), map[string]any{"answer": "4"})
+	if err != nil {
+		t.Fatalf("second handler: %v", err)
+	}
+
+	if second.Text != structuredOutputRepeatAck {
+		t.Errorf("second call text = %q, want repeat ack", second.Text)
+	}
+
+	if second.IsError {
+		t.Errorf("second call IsError = true, want false (captured-but-repeat is not an error)")
+	}
+
+	if !strings.Contains(second.Text, "already captured") {
+		t.Errorf("repeat ack does not mention prior capture: %q", second.Text)
 	}
 }
 
